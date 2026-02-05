@@ -29,4 +29,9 @@ pub trait Provider: Send + Sync {
     async fn lookup_track_isrc(&self, _uri: &str) -> Result<Option<String>> {
         Ok(None)
     }
+        /// Return the provider's name (for logging, UI, etc)
+        fn name(&self) -> &str;
+
+        /// Return true if the provider is authenticated and ready to process events
+        fn is_authenticated(&self) -> bool;
 }

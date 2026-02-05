@@ -6,7 +6,7 @@ use crate::models::{Event, EventAction};
 use anyhow::Result;
 use futures::future;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{info, warn, error};
 use uuid::Uuid;
 
 /// Worker orchestration: read unsynced events, group by playlist, collapse, apply rename then track adds/removes.
@@ -35,6 +35,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
     if events.is_empty() {
         info!("No pending events");
+            tracing::info!("No pending events");
+            info!("No pending events");
         return Ok(());
     }
 
@@ -42,45 +44,51 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     if let Some(thresh) = cfg.queue_length_stop_cloud_sync_threshold {
         if events.len() as u64 > thresh {
             warn!("Queue length {} > threshold {}; stopping worker processing", events.len(), thresh);
+                        tracing::warn!("Queue length {} > threshold {}; stopping worker processing", events.len(), thresh);
+                        warn!("Queue length {} > threshold {}; stopping worker processing", events.len(), thresh);
             return Ok(());
         }
     }
 
-    // Provider selection priority: Spotify -> Tidal -> Mock
-    // If env SPOTIFY_CLIENT_ID/SECRET present and DB has spotify token, use Spotify.
-    let provider: Arc<dyn Provider> = {
-        let db_path = cfg.db_path.clone();
-        let has_spotify = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
-            let conn = rusqlite::Connection::open(db_path)?;
-            Ok(db::load_credential_raw(&conn, "spotify")?.is_some())
-        })
-        .await??;
-
-        if has_spotify {
+    // Collect all authenticated providers
+    let mut providers: Vec<(String, Arc<dyn Provider>)> = Vec::new();
+    // Spotify
+    let db_path = cfg.db_path.clone();
+    let has_spotify = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
+        let conn = rusqlite::Connection::open(db_path)?;
+        Ok(db::load_credential_raw(&conn, "spotify")?.is_some())
+    })
+    .await??;
+    if has_spotify {
+        info!("Using Spotify provider");
+            tracing::info!("Using Spotify provider");
             info!("Using Spotify provider");
-            let client_id = std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_default();
-            let client_secret = std::env::var("SPOTIFY_CLIENT_SECRET").unwrap_or_default();
-            Arc::new(SpotifyProvider::new(client_id, client_secret, cfg.db_path.clone()))
-        } else {
-            // fallback to tidal if available
-            let db_path = cfg.db_path.clone();
-            let has_tidal = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
-                let conn = rusqlite::Connection::open(db_path)?;
-                Ok(db::load_credential_raw(&conn, "tidal")?.is_some())
-            })
-            .await??;
-
-            if has_tidal {
-                info!("Using Tidal provider");
-                let client_id = std::env::var("TIDAL_CLIENT_ID").unwrap_or_default();
-                let client_secret = std::env::var("TIDAL_CLIENT_SECRET").unwrap_or_default();
-                Arc::new(TidalProvider::new(client_id, client_secret, cfg.db_path.clone()))
-            } else {
-                info!("No provider credentials found — using MockProvider");
-                Arc::new(MockProvider::new())
-            }
-        }
-    };
+        let client_id = std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_default();
+        let client_secret = std::env::var("SPOTIFY_CLIENT_SECRET").unwrap_or_default();
+        providers.push(("spotify".to_string(), Arc::new(SpotifyProvider::new(client_id, client_secret, cfg.db_path.clone()))));
+    }
+    // Tidal
+    let db_path = cfg.db_path.clone();
+    let has_tidal = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
+        let conn = rusqlite::Connection::open(db_path)?;
+        Ok(db::load_credential_raw(&conn, "tidal")?.is_some())
+    })
+    .await??;
+    if has_tidal {
+        info!("Using Tidal provider");
+            tracing::info!("Using Tidal provider");
+            info!("Using Tidal provider");
+        let client_id = std::env::var("TIDAL_CLIENT_ID").unwrap_or_default();
+        let client_secret = std::env::var("TIDAL_CLIENT_SECRET").unwrap_or_default();
+        providers.push(("tidal".to_string(), Arc::new(TidalProvider::new(client_id, client_secret, cfg.db_path.clone()))));
+    }
+    // If no real providers, do not consume the queue
+    if providers.is_empty() {
+        warn!("No valid provider credentials configured. Queue will not be consumed.");
+            tracing::warn!("No valid provider credentials configured. Queue will not be consumed.");
+            warn!("No valid provider credentials configured. Queue will not be consumed.");
+        return Ok(());
+    }
 
     // Group events per playlist_name
     use std::collections::HashMap;
@@ -91,32 +99,41 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
     let worker_id = Uuid::new_v4().to_string();
 
-    // Process playlists sequentially (safety). Could be parallelized with locks.
-    for (playlist_name, evs) in groups {
-        info!("Attempting to process playlist {}", playlist_name);
+    // For each provider, process all playlists
+    for (provider_name, provider) in &providers {
+        info!("Processing events with provider: {}", provider_name);
+            tracing::info!("Processing events with provider: {}", provider_name);
+            info!("Processing events with provider: {}", provider_name);
+        // Process playlists sequentially (safety). Could be parallelized with locks.
+        for (playlist_name, evs) in &groups {
+            info!("Attempting to process playlist {} with provider {}", playlist_name, provider_name);
+            tracing::info!("Attempting to process playlist {} with provider {}", playlist_name, provider_name);
+            info!("Attempting to process playlist {} with provider {}", playlist_name, provider_name);
 
-        // Try acquire lock (TTL = 10 minutes default)
-        let lock_acquired = tokio::task::spawn_blocking({
-            let db_path = cfg.db_path.clone();
-            let pl = playlist_name.clone();
-            let wid = worker_id.clone();
-            move || -> Result<bool, anyhow::Error> {
-                let mut conn = rusqlite::Connection::open(db_path)?;
-                Ok(db::try_acquire_playlist_lock(&mut conn, &pl, &wid, 600)?)
+            // Try acquire lock (TTL = 10 minutes default)
+            let lock_acquired = tokio::task::spawn_blocking({
+                let db_path = cfg.db_path.clone();
+                let pl = playlist_name.clone();
+                let wid = worker_id.clone();
+                move || -> Result<bool, anyhow::Error> {
+                    let mut conn = rusqlite::Connection::open(db_path)?;
+                    Ok(db::try_acquire_playlist_lock(&mut conn, &pl, &wid, 600)?)
+                }
+            })
+            .await??;
+
+            if !lock_acquired {
+                info!("Skipped {} because lock could not be acquired", playlist_name);
+                                tracing::info!("Skipped {} because lock could not be acquired", playlist_name);
+                                info!("Skipped {} because lock could not be acquired", playlist_name);
+                continue;
             }
-        })
-        .await??;
 
-        if !lock_acquired {
-            info!("Skipped {} because lock could not be acquired", playlist_name);
-            continue;
-        }
+            // Ensure we release lock at end
+            let release_on_exit = (cfg.db_path.clone(), playlist_name.clone(), worker_id.clone());
 
-        // Ensure we release lock at end
-        let release_on_exit = (cfg.db_path.clone(), playlist_name.clone(), worker_id.clone());
-
-        // Collapse events
-        let collapsed = collapse_events(&evs);
+            // Collapse events
+            let collapsed = collapse_events(evs);
 
         // Find rename and collect track ops
         let mut rename_opt: Option<(String, String)> = None;
@@ -130,7 +147,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 _ => {}
             }
         }
-        for e in &evs {
+        for e in evs {
             original_ids.push(e.id);
         }
 
@@ -165,6 +182,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 }
                 Err(e) => {
                     error!("Failed to create remote playlist for {}: {}", playlist_name, e);
+                                        tracing::error!("Failed to create remote playlist for {}: {}", playlist_name, e);
+                                        error!("Failed to create remote playlist for {}: {}", playlist_name, e);
                     // release lock and continue
                     let (dbp, pln, wid) = release_on_exit.clone();
                     let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
@@ -187,15 +206,21 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 match res {
                     Ok(_) => {
                         info!("Renamed remote playlist {} -> {}", remote_id, to);
+                                                tracing::info!("Renamed remote playlist {} -> {}", remote_id, to);
+                                                info!("Renamed remote playlist {} -> {}", remote_id, to);
                         // update playlist_map name? Here we keep playlist_name as local key; remote_id unchanged.
                         break;
                     }
                     Err(e) => {
                         if attempt >= cfg.max_retries_on_error {
                             error!("Rename failed after {} attempts: {}", attempt, e);
+                                                        tracing::error!("Rename failed after {} attempts: {}", attempt, e);
+                                                        error!("Rename failed after {} attempts: {}", attempt, e);
                             break;
                         } else {
                             warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
+                                                        tracing::warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
+                                                        warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
                             tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                             continue;
                         }
@@ -246,9 +271,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     }
                     Ok(None) => {
                         warn!("Could not resolve track {} to remote URI", tp);
+                                            tracing::warn!("Could not resolve track {} to remote URI", tp);
+                                            warn!("Could not resolve track {} to remote URI", tp);
                     }
                     Err(e) => {
                         warn!("Error searching track {}: {}", tp, e);
+                                            tracing::warn!("Error searching track {}: {}", tp, e);
+                                            warn!("Error searching track {}: {}", tp, e);
                     }
                 }
             }
@@ -272,6 +301,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         match res {
                             Ok(_) => {
                                 info!("Applied {} {} tracks to {}", if is_add { "add" } else { "remove" }, chunk.len(), playlist_id);
+                                                                tracing::info!("Applied {} {} tracks to {}", if is_add { "add" } else { "remove" }, chunk.len(), playlist_id);
+                                                                info!("Applied {} {} tracks to {}", if is_add { "add" } else { "remove" }, chunk.len(), playlist_id);
                                 break;
                             }
                             Err(e) => {
@@ -297,20 +328,28 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         std::cmp::min(exp, 60)
                                     });
                                     warn!("Rate limited: {}. Sleeping {}s before retry.", e, wait);
+                                                                        tracing::warn!("Rate limited: {}. Sleeping {}s before retry.", e, wait);
+                                                                        warn!("Rate limited: {}. Sleeping {}s before retry.", e, wait);
                                     tokio::time::sleep(std::time::Duration::from_secs(wait + 1)).await;
                                     // continue retrying until max_retries_on_error
                                     if attempt >= cfg.max_retries_on_error {
                                         error!("Giving up after {} rate-limit attempts: {}", attempt, e);
+                                                                                tracing::error!("Giving up after {} rate-limit attempts: {}", attempt, e);
+                                                                                error!("Giving up after {} rate-limit attempts: {}", attempt, e);
                                         break;
                                     }
                                     continue;
                                 } else {
                                     if attempt >= cfg.max_retries_on_error {
                                         error!("Giving up after {} attempts: {}", attempt, e);
+                                                                                tracing::error!("Giving up after {} attempts: {}", attempt, e);
+                                                                                error!("Giving up after {} attempts: {}", attempt, e);
                                         break;
                                     } else {
                                         let exp = std::cmp::min(1u64 << attempt, 60);
                                         warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
+                                                                                tracing::warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
+                                                                                warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
                                         tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
                                         continue;
                                     }
@@ -325,9 +364,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         let provider_arc = provider.clone();
         if let Err(e) = apply_in_batches(provider_arc.clone(), &remote_id, remove_uris, false, cfg).await {
             error!("Error applying removes for {}: {}", playlist_name, e);
+                    tracing::error!("Error applying removes for {}: {}", playlist_name, e);
+                    error!("Error applying removes for {}: {}", playlist_name, e);
         }
         if let Err(e) = apply_in_batches(provider_arc.clone(), &remote_id, add_uris, true, cfg).await {
             error!("Error applying adds for {}: {}", playlist_name, e);
+                    tracing::error!("Error applying adds for {}: {}", playlist_name, e);
+                    error!("Error applying adds for {}: {}", playlist_name, e);
         }
 
         // Mark original events as synced (blocking)
@@ -350,8 +393,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             Ok(())
         })
         .await?;
+        }
     }
-
     Ok(())
 }
 

@@ -11,10 +11,22 @@ impl MockProvider {
     pub fn new() -> Self {
         Self {}
     }
+    fn is_authenticated(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &str {
+        "mock"
+    }
 }
 
 #[async_trait]
 impl Provider for MockProvider {
+    fn name(&self) -> &str {
+        MockProvider::name(self)
+    }
+    fn is_authenticated(&self) -> bool {
+        MockProvider::is_authenticated(self)
+    }
     async fn ensure_playlist(&self, name: &str, _description: &str) -> Result<String> {
         info!("MockProvider: ensure_playlist {}", name);
         Ok(format!("mock-playlist-{}", name))

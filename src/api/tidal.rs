@@ -41,6 +41,12 @@ impl TidalProvider {
             token: tokio::sync::Mutex::new(None),
         }
     }
+    fn is_authenticated(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+    fn name(&self) -> &str {
+        "tidal"
+    }
 
     fn base_url() -> String {
         std::env::var("TIDAL_API_BASE").unwrap_or_else(|_| "https://api.tidal.com/v1".into())
@@ -144,6 +150,12 @@ impl TidalProvider {
 
 #[async_trait]
 impl Provider for TidalProvider {
+    fn name(&self) -> &str {
+        TidalProvider::name(self)
+    }
+    fn is_authenticated(&self) -> bool {
+        TidalProvider::is_authenticated(self)
+    }
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
         // Tidal playlist creation (endpoint may differ; adapt to your access pattern).
         let bearer = self.get_bearer().await?;

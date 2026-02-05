@@ -44,6 +44,12 @@ impl SpotifyProvider {
             user_id: tokio::sync::Mutex::new(None),
         }
     }
+    fn is_authenticated(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+    fn name(&self) -> &str {
+        "spotify"
+    }
 
     fn auth_base() -> String {
         env::var("SPOTIFY_AUTH_BASE").unwrap_or_else(|_| "https://accounts.spotify.com".into())
@@ -110,8 +116,7 @@ impl SpotifyProvider {
         ];
         let auth_header = format!("Basic {}", general_purpose::STANDARD.encode(format!("{}:{}", self.client_id, self.client_secret)));
         let url = format!("{}/api/token", Self::auth_base());
-        let resp = self
-            .client
+        let resp = self.client
             .post(&url)
             .header(AUTHORIZATION, auth_header)
             .form(&params)
@@ -178,6 +183,12 @@ impl SpotifyProvider {
 
 #[async_trait]
 impl Provider for SpotifyProvider {
+    fn name(&self) -> &str {
+        SpotifyProvider::name(self)
+    }
+    fn is_authenticated(&self) -> bool {
+        SpotifyProvider::is_authenticated(self)
+    }
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
         let user_id = self.get_user_id().await?;
         let bearer = self.get_bearer().await?;

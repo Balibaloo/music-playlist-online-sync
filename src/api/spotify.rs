@@ -13,12 +13,12 @@ use std::env;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredToken {
-    access_token: String,
-    token_type: String,
-    expires_at: i64, // epoch seconds
-    refresh_token: Option<String>,
-    scope: Option<String>,
+pub struct StoredToken {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_at: i64, // epoch seconds
+    pub refresh_token: Option<String>,
+    pub scope: Option<String>,
 }
 
 /// Spotify provider backed by Spotify Web API.
@@ -35,6 +35,23 @@ pub struct SpotifyProvider {
 
 impl SpotifyProvider {
     pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf) -> Self {
+        // If either client_id or client_secret is empty, try to load from DB
+        let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                if let Ok(Some((_token_json, db_client_id, db_client_secret))) = crate::db::load_credential_with_client(&conn, "spotify") {
+                    (
+                        db_client_id.unwrap_or(client_id),
+                        db_client_secret.unwrap_or(client_secret),
+                    )
+                } else {
+                    (client_id, client_secret)
+                }
+            } else {
+                (client_id, client_secret)
+            }
+        } else {
+            (client_id, client_secret)
+        };
         Self {
             client: Client::new(),
             client_id,
@@ -63,12 +80,11 @@ impl SpotifyProvider {
         let db_path = self.db_path.clone();
         let json_opt = tokio::task::spawn_blocking(move || -> Result<Option<String>, anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::load_credential_raw(&conn, "spotify").map_err(|e| e.into())
+            Ok(crate::db::load_credential_with_client(&conn, "spotify")?.map(|(json, _, _)| json))
         })
         .await??;
 
         if let Some(s) = json_opt {
-            // Stored token may be in different shapes (TokenResponse or StoredToken); try both
             let st: StoredToken = serde_json::from_str(&s).map_err(|e| anyhow!("parse token json: {}", e))?;
             Ok(Some(st))
         } else {
@@ -81,7 +97,7 @@ impl SpotifyProvider {
         let s = serde_json::to_string(&st)?;
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::save_credential_raw(&conn, "spotify", &s)?;
+            db::save_credential_raw(&conn, "spotify", &s, None, None)?;
             Ok(())
         })
         .await??;

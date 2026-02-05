@@ -70,13 +70,26 @@ pub async fn run_spotify_auth(client_id: &str, client_secret: &str, redirect_uri
         let txt = resp.text().await.unwrap_or_default();
         return Err(anyhow!("token exchange failed: {} => {}", status, txt));
     }
+
     let tr: TokenResponse = resp.json().await?;
-    let token_json = serde_json::to_string(&tr)?;
+    // Compute expires_at as now + expires_in
+    let expires_at = chrono::Utc::now().timestamp() + tr.expires_in;
+    // Build the stored token to match what the provider expects
+    let stored_token = crate::api::spotify::StoredToken {
+        access_token: tr.access_token,
+        token_type: tr.token_type,
+        expires_at,
+        refresh_token: tr.refresh_token,
+        scope: tr.scope,
+    };
+    let token_json = serde_json::to_string(&stored_token)?;
     // Persist to DB (blocking)
     let db_path = cfg.db_path.clone();
+    let client_id = client_id.to_string();
+    let client_secret = client_secret.to_string();
     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
         let conn = rusqlite::Connection::open(db_path)?;
-        db::save_credential_raw(&conn, "spotify", &token_json)?;
+        db::save_credential_raw(&conn, "spotify", &token_json, Some(&client_id), Some(&client_secret))?;
         Ok(())
     })
     .await??;

@@ -33,6 +33,23 @@ pub struct TidalProvider {
 
 impl TidalProvider {
     pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf) -> Self {
+        // If either client_id or client_secret is empty, try to load from DB
+        let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                if let Ok(Some((_token_json, db_client_id, db_client_secret))) = crate::db::load_credential_with_client(&conn, "tidal") {
+                    (
+                        db_client_id.unwrap_or(client_id),
+                        db_client_secret.unwrap_or(client_secret),
+                    )
+                } else {
+                    (client_id, client_secret)
+                }
+            } else {
+                (client_id, client_secret)
+            }
+        } else {
+            (client_id, client_secret)
+        };
         Self {
             client: Client::new(),
             client_id,
@@ -60,7 +77,7 @@ impl TidalProvider {
         let db_path = self.db_path.clone();
         let json_opt = tokio::task::spawn_blocking(move || -> Result<Option<String>, anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::load_credential_raw(&conn, "tidal").map_err(|e| e.into())
+            Ok(crate::db::load_credential_with_client(&conn, "tidal")?.map(|(json, _, _)| json))
         })
         .await??;
 
@@ -77,7 +94,7 @@ impl TidalProvider {
         let s = serde_json::to_string(&st)?;
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::save_credential_raw(&conn, "tidal", &s)?;
+            db::save_credential_raw(&conn, "tidal", &s, None, None)?;
             Ok(())
         })
         .await??;

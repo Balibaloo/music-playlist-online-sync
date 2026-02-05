@@ -84,18 +84,32 @@ pub fn mark_events_synced(conn: &mut Connection, ids: &[i64]) -> Result<()> {
 }
 
 /// Save raw credential JSON for a provider (provider = "spotify" or "tidal")
-pub fn save_credential_raw(conn: &Connection, provider: &str, json_blob: &str) -> Result<()> {
+
+/// Save raw credential JSON for a provider, with optional client_id/client_secret
+pub fn save_credential_raw(
+    conn: &Connection,
+    provider: &str,
+    json_blob: &str,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO credentials (provider, token_json, last_refreshed) VALUES (?1, ?2, strftime('%s','now')) ON CONFLICT(provider) DO UPDATE SET token_json = excluded.token_json, last_refreshed = strftime('%s','now')",
-        params![provider, json_blob],
+        "INSERT INTO credentials (provider, token_json, client_id, client_secret, last_refreshed) VALUES (?1, ?2, ?3, ?4, strftime('%s','now')) ON CONFLICT(provider) DO UPDATE SET token_json = excluded.token_json, client_id = excluded.client_id, client_secret = excluded.client_secret, last_refreshed = strftime('%s','now')",
+        params![provider, json_blob, client_id, client_secret],
     )?;
     Ok(())
 }
 
 /// Load raw credential JSON for a provider
-pub fn load_credential_raw(conn: &Connection, provider: &str) -> Result<Option<String>> {
-    let mut stmt = conn.prepare("SELECT token_json FROM credentials WHERE provider = ?1 LIMIT 1")?;
-    let row = stmt.query_row(params![provider], |r| r.get::<_, String>(0)).optional()?;
+
+/// Load raw credential JSON and client_id/client_secret for a provider
+pub fn load_credential_with_client(conn: &Connection, provider: &str) -> Result<Option<(String, Option<String>, Option<String>)>> {
+    let mut stmt = conn.prepare("SELECT token_json, client_id, client_secret FROM credentials WHERE provider = ?1 LIMIT 1")?;
+    let row = stmt
+        .query_row(params![provider], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+        })
+        .optional()?;
     Ok(row)
 }
 

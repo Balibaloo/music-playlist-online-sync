@@ -29,10 +29,13 @@ CREATE TABLE IF NOT EXISTS track_cache (
   resolved_at INTEGER
 );
 
--- credentials
+
+-- credentials (now with client_id and client_secret)
 CREATE TABLE IF NOT EXISTS credentials (
   provider TEXT PRIMARY KEY,
   token_json TEXT NOT NULL,
+  client_id TEXT,
+  client_secret TEXT,
   last_refreshed INTEGER
 );
 

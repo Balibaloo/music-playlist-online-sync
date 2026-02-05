@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_appender::rolling::RollingFileAppender;
 use anyhow::Result;
 use music_file_playlist_online_sync as lib;
 use lib::api::Provider;

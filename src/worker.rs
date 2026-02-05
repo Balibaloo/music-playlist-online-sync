@@ -6,7 +6,6 @@ use crate::models::{Event, EventAction};
 use anyhow::Result;
 
 use std::sync::Arc;
-use tracing::{info, warn, error};
 use uuid::Uuid;
 
 /// Worker orchestration: read unsynced events, group by playlist, collapse, apply rename then track adds/removes.
@@ -34,14 +33,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     .await??;
 
     if events.is_empty() {
-        tracing::info!("No pending events");
+        log::info!("No pending events");
         return Ok(());
     }
 
     // Backpressure
     if let Some(thresh) = cfg.queue_length_stop_cloud_sync_threshold {
         if events.len() as u64 > thresh {
-            tracing::warn!("Queue length {} > threshold {}; stopping worker processing", events.len(), thresh);
+            log::warn!("Queue length {} > threshold {}; stopping worker processing", events.len(), thresh);
             return Ok(());
         }
     }
@@ -56,7 +55,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     })
     .await??;
     if has_spotify {
-        tracing::info!("Using Spotify provider");
+        log::info!("Using Spotify provider");
         providers.push(("spotify".to_string(), Arc::new(SpotifyProvider::new(String::new(), String::new(), cfg.db_path.clone()))));
     }
     // Tidal
@@ -67,12 +66,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     })
     .await??;
     if has_tidal {
-        tracing::info!("Using Tidal provider");
+        log::info!("Using Tidal provider");
         providers.push(("tidal".to_string(), Arc::new(TidalProvider::new(String::new(), String::new(), cfg.db_path.clone()))));
     }
     // If no real providers, do not consume the queue
     if providers.is_empty() {
-        tracing::warn!("No valid provider credentials configured. Queue will not be consumed.");
+        log::warn!("No valid provider credentials configured. Queue will not be consumed.");
         return Ok(());
     }
 
@@ -87,10 +86,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
     // For each provider, process all playlists
     for (provider_name, provider) in &providers {
-        tracing::info!("Processing events with provider: {}", provider_name);
+        log::info!("Processing events with provider: {}", provider_name);
         // Process playlists sequentially (safety). Could be parallelized with locks.
         for (playlist_name, evs) in &groups {
-            tracing::info!("Attempting to process playlist {} with provider {}", playlist_name, provider_name);
+            log::info!("Attempting to process playlist {} with provider {}", playlist_name, provider_name);
 
             // Try acquire lock (TTL = 10 minutes default)
             let lock_acquired = tokio::task::spawn_blocking({
@@ -105,9 +104,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             .await??;
 
             if !lock_acquired {
-                info!("Skipped {} because lock could not be acquired", playlist_name);
-                                tracing::info!("Skipped {} because lock could not be acquired", playlist_name);
-                                info!("Skipped {} because lock could not be acquired", playlist_name);
+                log::info!("Skipped {} because lock could not be acquired", playlist_name);
                 continue;
             }
 
@@ -163,9 +160,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     rid
                 }
                 Err(e) => {
-                    error!("Failed to create remote playlist for {}: {}", playlist_name, e);
-                                        tracing::error!("Failed to create remote playlist for {}: {}", playlist_name, e);
-                                        error!("Failed to create remote playlist for {}: {}", playlist_name, e);
+                    log::error!("Failed to create remote playlist for {}: {}", playlist_name, e);
                     // release lock and continue
                     let (dbp, pln, wid) = release_on_exit.clone();
                     let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
@@ -187,22 +182,16 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 let res = provider.rename_playlist(&remote_id, &to).await;
                 match res {
                     Ok(_) => {
-                        info!("Renamed remote playlist {} -> {}", remote_id, to);
-                                                tracing::info!("Renamed remote playlist {} -> {}", remote_id, to);
-                                                info!("Renamed remote playlist {} -> {}", remote_id, to);
+                        log::info!("Renamed remote playlist {} -> {}", remote_id, to);
                         // update playlist_map name? Here we keep playlist_name as local key; remote_id unchanged.
                         break;
                     }
                     Err(e) => {
                         if attempt >= cfg.max_retries_on_error {
-                            error!("Rename failed after {} attempts: {}", attempt, e);
-                                                        tracing::error!("Rename failed after {} attempts: {}", attempt, e);
-                                                        error!("Rename failed after {} attempts: {}", attempt, e);
+                            log::error!("Rename failed after {} attempts: {}", attempt, e);
                             break;
                         } else {
-                            warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
-                                                        tracing::warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
-                                                        warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
+                            log::warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
                             tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                             continue;
                         }
@@ -251,15 +240,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         })
                         .await??;
                     }
+                    #[allow(non_snake_case)]
                     Ok(None) => {
-                        warn!("Could not resolve track {} to remote URI", tp);
-                                            tracing::warn!("Could not resolve track {} to remote URI", tp);
-                                            warn!("Could not resolve track {} to remote URI", tp);
+                        log::warn!("Could not resolve track {} to remote URI", tp);
                     }
                     Err(e) => {
-                        warn!("Error searching track {}: {}", tp, e);
-                                            tracing::warn!("Error searching track {}: {}", tp, e);
-                                            warn!("Error searching track {}: {}", tp, e);
+                        log::warn!("Error searching track {}: {}", tp, e);
                     }
                 }
             }
@@ -282,7 +268,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         };
                         match res {
                             Ok(_) => {
-                                tracing::info!("Applied {} {} tracks to {}", if is_add { "add" } else { "remove" }, chunk.len(), playlist_id);
+                                log::info!("Applied {} {} tracks to {}", if is_add { "add" } else { "remove" }, chunk.len(), playlist_id);
                                 break;
                             }
                             Err(e) => {
@@ -307,27 +293,21 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         let exp = 2u64.saturating_pow(std::cmp::min(attempt, 6));
                                         std::cmp::min(exp, 60)
                                     });
-                                    tracing::warn!("Rate limited: {}. Sleeping {}s before retry.", e, wait);
+                                    log::warn!("Rate limited: {}. Sleeping {}s before retry.", e, wait);
                                     tokio::time::sleep(std::time::Duration::from_secs(wait + 1)).await;
                                     // continue retrying until max_retries_on_error
                                     if attempt >= cfg.max_retries_on_error {
-                                        tracing::error!("Giving up after {} rate-limit attempts: {}", attempt, e);
-                                                                                tracing::error!("Giving up after {} rate-limit attempts: {}", attempt, e);
-                                                                                error!("Giving up after {} rate-limit attempts: {}", attempt, e);
+                                        log::error!("Giving up after {} rate-limit attempts: {}", attempt, e);
                                         break;
                                     }
                                     continue;
                                 } else {
                                     if attempt >= cfg.max_retries_on_error {
-                                        error!("Giving up after {} attempts: {}", attempt, e);
-                                                                                tracing::error!("Giving up after {} attempts: {}", attempt, e);
-                                                                                error!("Giving up after {} attempts: {}", attempt, e);
+                                        log::error!("Giving up after {} attempts: {}", attempt, e);
                                         break;
                                     } else {
                                         let exp = std::cmp::min(1u64 << attempt, 60);
-                                        warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
-                                                                                tracing::warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
-                                                                                warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
+                                        log::warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
                                         tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
                                         continue;
                                     }
@@ -341,14 +321,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
         let provider_arc = provider.clone();
         if let Err(e) = apply_in_batches(provider_arc.clone(), &remote_id, remove_uris, false, cfg).await {
-            error!("Error applying removes for {}: {}", playlist_name, e);
-                    tracing::error!("Error applying removes for {}: {}", playlist_name, e);
-                    error!("Error applying removes for {}: {}", playlist_name, e);
+                log::error!("Error applying removes for {}: {}", playlist_name, e);
         }
         if let Err(e) = apply_in_batches(provider_arc.clone(), &remote_id, add_uris, true, cfg).await {
-            error!("Error applying adds for {}: {}", playlist_name, e);
-                    tracing::error!("Error applying adds for {}: {}", playlist_name, e);
-                    error!("Error applying adds for {}: {}", playlist_name, e);
+                log::error!("Error applying adds for {}: {}", playlist_name, e);
         }
 
         // Mark original events as synced (blocking)
@@ -390,11 +366,11 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
 
         if cfg.playlist_mode == "flat" {
             if let Err(e) = crate::playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode) {
-                tracing::warn!("Failed to write playlist {:?}: {}", playlist_path, e);
+                log::warn!("Failed to write playlist {:?}: {}", playlist_path, e);
             }
         } else {
             if let Err(e) = crate::playlist::write_linked_playlist(folder, &playlist_path, &cfg.linked_reference_format, &cfg.local_playlist_template) {
-                tracing::warn!("Failed to write linked playlist {:?}: {}", playlist_path, e);
+                log::warn!("Failed to write linked playlist {:?}: {}", playlist_path, e);
             }
         }
 
@@ -404,10 +380,10 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         let h = std::thread::spawn(move || {
             if let Ok(conn) = crate::db::open_or_create(std::path::Path::new(&db_path)) {
                 if let Err(e) = crate::db::enqueue_event(&conn, &pname, &crate::models::EventAction::Create, None, None) {
-                    tracing::warn!("Failed to enqueue nightly create event for {}: {}", pname, e);
+                    log::warn!("Failed to enqueue nightly create event for {}: {}", pname, e);
                 }
             } else {
-                tracing::warn!("Failed to open DB to enqueue nightly event");
+                log::warn!("Failed to open DB to enqueue nightly event");
             }
         });
         handles.push(h);

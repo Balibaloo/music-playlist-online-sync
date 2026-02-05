@@ -1,15 +1,14 @@
+use base64::Engine;
 use super::Provider;
 use crate::db;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
-use tracing::{debug, info, warn};
+use log;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredToken {
@@ -134,11 +133,11 @@ impl TidalProvider {
         if let Some(st) = &*lock {
             let now = Utc::now().timestamp();
             if now + 30 >= st.expires_at {
-                debug!("Tidal token near expiry, attempting refresh");
+                log::debug!("Tidal token near expiry, attempting refresh");
                 // attempt refresh if refresh_token present
                 let mut cur = st.clone();
                 if let Err(e) = self.refresh_token_internal(&mut cur).await {
-                    warn!("Tidal token refresh failed: {}", e);
+                    log::warn!("Tidal token refresh failed: {}", e);
                 } else {
                     *lock = Some(cur);
                 }

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use walkdir::WalkDir;
 
 /// Write a simple flat .m3u playlist for folder: all files recursively (prototype).

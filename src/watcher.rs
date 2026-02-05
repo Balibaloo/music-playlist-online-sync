@@ -1,3 +1,5 @@
+use log::{info, warn};
+use std::sync::{Arc, Mutex};
 use crate::config::Config;
 use crate::db;
 use crate::playlist;
@@ -6,10 +8,8 @@ use crate::models::EventAction;
 use notify::{Config as NotifyConfig, Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc::channel, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
 /// A node represents one folder: immediate children folders, and immediate track files.
@@ -230,10 +230,10 @@ pub enum SyntheticEvent {
 pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     info!("Starting watcher with root {:?}", cfg.root_folder);
     // Open DB (blocking)
-    let conn = db::open_or_create(&cfg.db_path)?;
+    let _conn = db::open_or_create(&cfg.db_path)?;
 
     // Build initial in-memory tree
-    let mut tree = InMemoryTree::build(&cfg.root_folder, if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) })?;
+    let tree = InMemoryTree::build(&cfg.root_folder, if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) })?;
     info!("Initial scan complete: {} folders", tree.nodes.len());
 
     // Initial playlist writes (flat mode)
@@ -255,7 +255,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
 
     // Shared debounce queue: map playlist folder -> earliest_due Instant
     let debounce_map: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-    let debounce_ms = cfg.debounce_ms;
+    let _debounce_ms = cfg.debounce_ms;
 
     // Wrap in-memory tree in Arc<Mutex<...>> so notify callback can update it concurrently
     let tree = Arc::new(Mutex::new(tree));
@@ -266,7 +266,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         let debounce_map = debounce_map.clone();
         let cfg = cfg.clone();
         let db_path = cfg.db_path.clone();
-        let tree = tree.clone();
+        let _tree = tree.clone();
         thread::spawn(move || {
             loop {
                 // collect due playlists

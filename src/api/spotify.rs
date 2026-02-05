@@ -1,3 +1,4 @@
+use log::{warn, debug};
 use super::Provider;
 use crate::db;
 use anyhow::{anyhow, Result};
@@ -8,9 +9,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
 use std::env;
-use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredToken {

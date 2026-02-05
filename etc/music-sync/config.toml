@@ -1,0 +1,25 @@
+root_folder = "/srv/music"
+whitelist = "" # colon-separated list; empty -> all under root
+local_playlist_template = "${folder_name}.m3u"
+remote_playlist_template = "${relative_path}"
+playlist_description_template = ""
+playlist_order_mode = "append" # "append" or "sync_order"
+playlist_mode = "flat" # "flat" or "linked"
+linked_reference_format = "relative"
+debounce_ms = 250
+log_dir = "/var/log/music-sync"
+token_refresh_interval = 3600
+
+# Worker / timing
+worker_interval_sec = 300
+nightly_reconcile_cron = "0 3 * * *" # cron expression
+
+# Queue / DB
+queue_length_stop_cloud_sync_threshold = 10 # if null/unset -> disable self-stop behavior
+
+# Retry / failure handling
+max_retries_on_error = 3
+# 429 / rate-limited responses are handled with Retry-After/backoff (not counted against max_retries_on_error)
+
+# tunables
+max_batch_size_spotify = 100

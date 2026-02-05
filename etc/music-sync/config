@@ -1,0 +1,16 @@
+root_folder = "/srv/music"
+whitelist = "" # colon-separated; empty -> all subfolders
+local_playlist_template = "${folder_name}.m3u"
+remote_playlist_template = "${relative_path}"
+playlist_description_template = ""
+playlist_order_mode = "append" # "append" or "sync_order"
+playlist_mode = "flat" # "flat" or "linked"
+linked_reference_format = "relative"
+debounce_ms = 250
+log_dir = "/var/log/music-sync"
+token_refresh_interval = 3600
+
+# other tuning
+worker_interval_sec = 300
+max_batch_size_spotify = 100
+queue_backpressure_threshold = 100

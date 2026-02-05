@@ -1,0 +1,16 @@
+post_install() {
+  echo "\nTo finish setup:"
+  echo "1. Copy the example config:"
+  echo "   sudo cp /etc/music-sync/example-config.toml /etc/music-sync/config.toml"
+  echo "   sudo nano /etc/music-sync/config.toml   # edit root_folder, db_path, credentials"
+  echo "2. Set permissions:"
+  echo "   sudo chown root:root /etc/music-sync/config.toml"
+  echo "   sudo chmod 0640 /etc/music-sync/config.toml"
+  echo "3. Reload systemd and enable the worker service:"
+  echo "   sudo systemctl daemon-reload"
+  echo "   sudo systemctl enable --now music-file-playlist-online-sync-worker.service"
+  echo "\nAuthentication:"
+  echo "- For Spotify/Tidal, set credentials in config and follow provider instructions."
+  echo "- If no credentials are configured, the worker will use MockProvider (no real sync)."
+  echo "\nSee /etc/music-sync/example-config.toml and project README for details."
+}

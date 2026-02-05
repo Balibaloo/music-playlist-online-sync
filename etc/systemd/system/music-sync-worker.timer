@@ -1,0 +1,10 @@
+[Unit]
+Description=Run music-sync worker periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

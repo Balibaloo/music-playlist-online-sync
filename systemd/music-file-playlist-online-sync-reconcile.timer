@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly full reconciliation (Thursday 03:00) and trigger if missed on boot
+
+[Timer]
+# Weekly Thursday at 03:00
+OnCalendar=Thu *-*-* 03:00:00
+# Run shortly after boot if missed and Persistent=true causes it to run if last run before boot was missed.
+OnBootSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

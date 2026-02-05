@@ -1,0 +1,9 @@
+[Unit]
+Description=Music File Playlist Online Sync - Worker (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=music-file-playlist-online-sync
+ExecStart=/usr/bin/music-file-playlist-online-sync --config /etc/music-sync/config.toml worker
+WorkingDirectory=/var/lib/music-sync

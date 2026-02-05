@@ -1,0 +1,10 @@
+# Suggested labels for the repository
+- name: bug
+  color: d73a4a
+  description: Problems or regressions
+- name: enhancement
+  color: a2eeef
+  description: New features or improvements
+- name: high-priority
+  color: b60205
+  description: Urgent issues blocking progress

@@ -1,0 +1,28 @@
+# Rust build
+/target/
+Cargo.lock
+
+# Packaging
+/packaging/dist/
+*.pkg.tar.zst
+
+# Editor/IDE
+*.swp
+*.swo
+*.bak
+*.tmp
+/.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test output
+/test-output/
+
+# Misc
+*.old
+*.orig

@@ -1,0 +1,10 @@
+[Unit]
+Description=Music File Playlist Online Sync - Watcher
+After=network.target
+
+[Service]
+Type=simple
+User=music-file-playlist-online-sync
+ExecStart=/usr/bin/music-file-playlist-online-sync --config /etc/music-sync/config.toml watcher
+Restart=on-failure
+WorkingDirectory=/var/lib/music-sync

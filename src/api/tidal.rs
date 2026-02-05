@@ -32,6 +32,28 @@ pub struct TidalProvider {
 }
 
 impl TidalProvider {
+        /// List all playlists for the authenticated user
+        pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
+        let bearer = self.get_bearer().await?;
+        let base = Self::base_url();
+        let url = format!("{}/users/me/playlists?limit=50", base);
+        let resp = self.client.get(&url).header(AUTHORIZATION, &bearer).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("list playlists failed: {} => {}", status, txt));
+        }
+        let j: serde_json::Value = resp.json().await?;
+        let mut playlists = Vec::new();
+        if let Some(items) = j["items"].as_array() {
+            for pl in items {
+                let name = pl["title"].as_str().unwrap_or("").to_string();
+                let id = pl.get("uuid").or_else(|| pl.get("id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                playlists.push((id, name));
+            }
+        }
+        Ok(playlists)
+    }
     pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf) -> Self {
         // If either client_id or client_secret is empty, try to load from DB
         let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {

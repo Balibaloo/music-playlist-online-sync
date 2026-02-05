@@ -34,6 +34,31 @@ pub struct SpotifyProvider {
 }
 
 impl SpotifyProvider {
+        /// List all playlists for the authenticated user
+        pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
+        let user_id = self.get_user_id().await?;
+        let bearer = self.get_bearer().await?;
+        let mut playlists = Vec::new();
+        let mut next_url = Some(format!("{}/users/{}/playlists?limit=50", Self::api_base(), url::form_urlencoded::byte_serialize(user_id.as_bytes()).collect::<String>()));
+        while let Some(url) = next_url {
+            let resp = self.client.get(&url).header(AUTHORIZATION, &bearer).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let txt = resp.text().await.unwrap_or_default();
+                return Err(anyhow!("list playlists failed: {} => {}", status, txt));
+            }
+            let j: serde_json::Value = resp.json().await?;
+            if let Some(items) = j["items"].as_array() {
+                for pl in items {
+                    let name = pl["name"].as_str().unwrap_or("").to_string();
+                    let id = pl["id"].as_str().unwrap_or("").to_string();
+                    playlists.push((id, name));
+                }
+            }
+            next_url = j["next"].as_str().map(|s| s.to_string());
+        }
+        Ok(playlists)
+    }
     pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf) -> Self {
         // If either client_id or client_secret is empty, try to load from DB
         let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {

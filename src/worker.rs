@@ -85,8 +85,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     // If no real providers, do not consume the queue
     if providers.is_empty() {
         warn!("No valid provider credentials configured. Queue will not be consumed.");
-            tracing::warn!("No valid provider credentials configured. Queue will not be consumed.");
-            warn!("No valid provider credentials configured. Queue will not be consumed.");
+        tracing::warn!("No valid provider credentials configured. Queue will not be consumed.");
         return Ok(());
     }
 

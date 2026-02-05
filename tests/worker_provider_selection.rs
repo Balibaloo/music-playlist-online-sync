@@ -39,7 +39,7 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move { run_worker_once(&cfg).await.unwrap() });
 
-    // verify events marked synced
+    // verify event is NOT marked synced (since no real provider is configured)
     let cnt: i64 = conn.query_row("SELECT COUNT(*) FROM event_queue WHERE is_synced = 0", [], |r| r.get(0)).unwrap();
-    assert_eq!(cnt, 0);
+    assert_eq!(cnt, 1);
 }

@@ -1,11 +1,11 @@
-# Maintainer: Roman <your-email@example.com>
+# Maintainer: Roman <romankubiv101@gmail.com>
 pkgname=music-file-playlist-online-sync
-giturl="https://github.com/roman/music-playlist-online-sync.git"
+giturl="https://github.com/Balibaloo/music-playlist-online-sync.git"
 pkgver=0.2.0
 pkgrel=1
-pkgdesc="Music folder to remote playlist sync tool (Spotify/Tidal prototype)"
+pkgdesc="Music folder to local playlists to remote playlist sync tool (Spotify/Tidal)"
 arch=('x86_64')
-url="https://github.com/roman/music-playlist-online-sync"
+url="https://github.com/Balibaloo/music-playlist-online-sync"
 license=('MIT')
 depends=('systemd')
 makedepends=('rust' 'cargo' 'pkg-config')
@@ -14,6 +14,7 @@ md5sums=('SKIP')
 
 build() {
   cd "$srcdir/music-playlist-online-sync"
+  cargo clean
   cargo build --release --locked
 }
 

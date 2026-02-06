@@ -114,13 +114,15 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             // Collapse events
             let collapsed = collapse_events(evs);
 
-        // Find rename and collect track ops
+        // Find rename/delete and collect track ops
         let mut rename_opt: Option<(String, String)> = None;
+        let mut has_delete: bool = false;
         let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
         let mut original_ids: Vec<i64> = Vec::new();
         for op in &collapsed {
             match &op.action {
                 EventAction::Rename { from, to } => rename_opt = Some((from.clone(), to.clone())),
+                EventAction::Delete => has_delete = true,
                 EventAction::Add => track_ops.push((EventAction::Add, op.track_path.clone())),
                 EventAction::Remove => track_ops.push((EventAction::Remove, op.track_path.clone())),
                 _ => {}
@@ -130,7 +132,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             original_ids.push(e.id);
         }
 
-        // Resolve remote playlist id from playlist_map or create via provider.ensure_playlist
+        // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed)
         let remote_id_opt = tokio::task::spawn_blocking({
             let db_path = cfg.db_path.clone();
             let pl = playlist_name.clone();
@@ -140,6 +142,70 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
         })
         .await??;
+
+        // If this playlist is being deleted, attempt to delete remotely and clean up local state,
+        // then skip any add/remove operations.
+        if has_delete {
+            if let Some(remote_id) = remote_id_opt.clone() {
+                let mut attempt = 0u32;
+                loop {
+                    attempt += 1;
+                    let res = provider.delete_playlist(&remote_id).await;
+                    match res {
+                        Ok(_) => {
+                            log::info!("Deleted remote playlist {} ({})", playlist_name, remote_id);
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt >= cfg.max_retries_on_error {
+                                log::error!("Delete failed after {} attempts: {}", attempt, e);
+                                break;
+                            } else {
+                                log::warn!("Delete attempt {} failed: {}. Retrying...", attempt, e);
+                                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            } else {
+                log::info!("No remote playlist id for {}; skipping remote delete", playlist_name);
+            }
+
+            // Remove local playlist_map entry regardless of whether remote deletion succeeded
+            let pl = playlist_name.clone();
+            let db_path = cfg.db_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                let conn = rusqlite::Connection::open(db_path)?;
+                let _ = db::delete_playlist_map(&conn, &pl)?;
+                Ok(())
+            })
+            .await??;
+
+            // Mark original events as synced (so they don't get retried forever)
+            let ids_clone = original_ids.clone();
+            let db_path = cfg.db_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                let mut conn = rusqlite::Connection::open(db_path)?;
+                if !ids_clone.is_empty() {
+                    db::mark_events_synced(&mut conn, &ids_clone)?;
+                }
+                Ok(())
+            })
+            .await??;
+
+            // release lock
+            let (dbp, pln, wid) = release_on_exit.clone();
+            let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                let mut conn = rusqlite::Connection::open(dbp)?;
+                db::release_playlist_lock(&mut conn, &pln, &wid)?;
+                Ok(())
+            })
+            .await?;
+
+            // Move to next playlist/provider
+            continue;
+        }
 
         let remote_id = if let Some(rid) = remote_id_opt {
             rid
@@ -369,7 +435,7 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         let playlist_path = folder.join(&playlist_name);
 
         if cfg.playlist_mode == "flat" {
-            if let Err(e) = crate::playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode) {
+            if let Err(e) = crate::playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode, &cfg.file_extensions) {
                 log::warn!("Failed to write playlist {:?}: {}", playlist_path, e);
             }
         } else {

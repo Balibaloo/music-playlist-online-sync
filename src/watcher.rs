@@ -6,6 +6,7 @@ use crate::playlist;
 use crate::util;
 use crate::models::EventAction;
 use notify::{Config as NotifyConfig, Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
+use notify::event::RemoveKind;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -284,7 +285,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         let playlist_name = util::expand_template(&cfg.local_playlist_template, folder_name, &rel);
         let playlist_path = folder.join(playlist_name);
         if cfg.playlist_mode == "flat" {
-            if let Err(e) = playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode) {
+            if let Err(e) = playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode, &cfg.file_extensions) {
                 warn!("Failed to write initial playlist {:?}: {}", playlist_path, e);
             }
         } else {
@@ -335,7 +336,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
 
                     // choose playlist mode
                     if cfg.playlist_mode == "flat" {
-                        if let Err(e) = playlist::write_flat_playlist(&folder, &playlist_path, &cfg.playlist_order_mode) {
+                        if let Err(e) = playlist::write_flat_playlist(&folder, &playlist_path, &cfg.playlist_order_mode, &cfg.file_extensions) {
                             warn!("Failed to write playlist {:?}: {}", playlist_path, e);
                         }
                     } else {
@@ -394,31 +395,46 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                 let is_file = path.is_file();
                                 let is_dir = path.is_dir();
 
-                                // If a file_extensions whitelist is provided, only treat
-                                // matching media files as track events.
-                                if is_file && !path_matches_extensions(path, &cfg_cb.file_extensions) {
-                                    continue;
-                                }
-
                                 match &ev.kind {
                                     EventKind::Create(_) => {
                                         if is_file {
-                                            synths.push(SyntheticEvent::FileCreate(path.clone()));
+                                            // Only treat matching media files as track events
+                                            if path_matches_extensions(path, &cfg_cb.file_extensions) {
+                                                synths.push(SyntheticEvent::FileCreate(path.clone()));
+                                            }
                                         } else if is_dir {
                                             synths.push(SyntheticEvent::FolderCreate(path.clone()));
                                         }
                                     }
-                                    EventKind::Remove(_) => {
+                                    EventKind::Remove(remove_kind) => {
                                         if is_file {
-                                            synths.push(SyntheticEvent::FileRemove(path.clone()));
+                                            if path_matches_extensions(path, &cfg_cb.file_extensions) {
+                                                synths.push(SyntheticEvent::FileRemove(path.clone()));
+                                            }
                                         } else if is_dir {
                                             synths.push(SyntheticEvent::FolderRemove(path.clone()));
+                                        } else {
+                                            // After a remove, the path may no longer exist on disk,
+                                            // so fall back to the RemoveKind from notify.
+                                            match remove_kind {
+                                                RemoveKind::File | RemoveKind::Any => {
+                                                    if path_matches_extensions(path, &cfg_cb.file_extensions) {
+                                                        synths.push(SyntheticEvent::FileRemove(path.clone()));
+                                                    }
+                                                }
+                                                RemoveKind::Folder => {
+                                                    synths.push(SyntheticEvent::FolderRemove(path.clone()));
+                                                }
+                                                _ => {}
+                                            }
                                         }
                                     }
                                     EventKind::Modify(_) => {
                                         if is_file {
                                             // treat modify as create/update of file
-                                            synths.push(SyntheticEvent::FileCreate(path.clone()));
+                                            if path_matches_extensions(path, &cfg_cb.file_extensions) {
+                                                synths.push(SyntheticEvent::FileCreate(path.clone()));
+                                            }
                                         }
                                     }
                                     _ => {}
@@ -491,8 +507,8 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                     }
                                                 });
                                             }
-                                            LogicalOp::Create { playlist_folder } | LogicalOp::Delete { playlist_folder } => {
-                                                info!("LogicalOp::{}/Delete playlist_folder={:?}", "Create", playlist_folder);
+                                            LogicalOp::Create { playlist_folder } => {
+                                                info!("LogicalOp::Create playlist_folder={:?}", playlist_folder);
                                                 if let Ok(mut dm) = debounce_map_cb.lock() {
                                                     dm.insert(playlist_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
                                                     if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
@@ -505,6 +521,42 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                         }
                                                     }
                                                 }
+                                            }
+                                            LogicalOp::Delete { playlist_folder } => {
+                                                info!("LogicalOp::Delete playlist_folder={:?}", playlist_folder);
+                                                // For deletes, debounce only ancestor folders (for linked playlists),
+                                                // and enqueue a Delete event for the removed playlist itself.
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
+                                                    if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
+                                                        while p.starts_with(&cfg_cb.root_folder) {
+                                                            if t.nodes.contains_key(&p) {
+                                                                dm.insert(p.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
+                                                            }
+                                                            if p == cfg_cb.root_folder { break; }
+                                                            if let Some(np) = p.parent().map(|x| x.to_path_buf()) { p = np; } else { break; }
+                                                        }
+                                                    }
+                                                }
+
+                                                // Enqueue a Delete event so the worker can eventually delete
+                                                // the corresponding remote playlist.
+                                                let folder_name = playlist_folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                                                let rel = playlist_folder
+                                                    .strip_prefix(&cfg_cb.root_folder)
+                                                    .unwrap_or(&playlist_folder)
+                                                    .display()
+                                                    .to_string();
+                                                let playlist_name = util::expand_template(&cfg_cb.local_playlist_template, folder_name, &rel);
+
+                                                let db_path2 = db_path.clone();
+                                                let pname = playlist_name.clone();
+                                                thread::spawn(move || {
+                                                    if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
+                                                        if let Err(e) = db::enqueue_event(&conn, &pname, &EventAction::Delete, None, None) {
+                                                            warn!("Failed to enqueue delete event: {}", e);
+                                                        }
+                                                    }
+                                                });
                                             }
                                             LogicalOp::PlaylistRename { from_folder, to_folder } => {
                                                 info!("LogicalOp::PlaylistRename from_folder={:?}, to_folder={:?}", from_folder, to_folder);

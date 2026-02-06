@@ -138,6 +138,15 @@ pub fn upsert_playlist_map(conn: &Connection, playlist_name: &str, remote_id: &s
     Ok(())
 }
 
+/// Delete a playlist_map entry by playlist_name
+pub fn delete_playlist_map(conn: &Connection, playlist_name: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM playlist_map WHERE playlist_name = ?1",
+        params![playlist_name],
+    )?;
+    Ok(())
+}
+
 /// Lookup a track cache entry by local path
 pub fn get_track_cache_by_local(conn: &Connection, local_path: &str) -> Result<Option<(Option<String>, Option<String>)>> {
     let mut stmt = conn.prepare("SELECT isrc, remote_id FROM track_cache WHERE local_path = ?1 LIMIT 1")?;

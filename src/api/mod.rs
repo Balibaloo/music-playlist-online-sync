@@ -22,6 +22,9 @@ pub trait Provider: Send + Sync {
     /// Remove tracks (URIs) from playlist
     async fn remove_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()>;
 
+    /// Delete a playlist entirely on the provider side
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<()>;
+
     /// Search for a track by metadata: title, artist. Return a remote URI if found.
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>>;
 

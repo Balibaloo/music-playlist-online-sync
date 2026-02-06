@@ -47,6 +47,11 @@ impl Provider for MockProvider {
         Ok(())
     }
 
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        info!("MockProvider: delete_playlist {}", playlist_id);
+        Ok(())
+    }
+
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>> {
         info!("MockProvider: search {} - {}", title, artist);
         Ok(Some(format!("mock:track:{}:{}", title, artist)))

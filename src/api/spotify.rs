@@ -353,6 +353,29 @@ impl Provider for SpotifyProvider {
         Ok(())
     }
 
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        // Spotify does not support hard-deleting playlists; instead, the
+        // current user "unfollows" the playlist, which effectively removes
+        // it from their library. The documented endpoint is:
+        // DELETE /playlists/{playlist_id}/followers
+        let bearer = self.get_bearer().await?;
+        let url = format!("{}/playlists/{}/followers", Self::api_base(), playlist_id);
+        let resp = self.client.delete(&url).header(AUTHORIZATION, &bearer).send().await?;
+        if resp.status().as_u16() == 401 {
+            self.ensure_token().await?;
+            let bearer2 = self.get_bearer().await?;
+            let resp2 = self.client.delete(&url).header(AUTHORIZATION, &bearer2).send().await?;
+            if !resp2.status().is_success() {
+                return Err(anyhow!("delete playlist failed: {}", resp2.status()));
+            }
+            return Ok(());
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!("delete playlist failed: {}", resp.status()));
+        }
+        Ok(())
+    }
+
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>> {
         let q = format!("track:{} artist:{}", title, artist);
         let url = format!("{}/search?q={}&type=track&limit=1", Self::api_base(), urlencoding::encode(&q));

@@ -1,5 +1,5 @@
 root_folder = "/music"
-whitelist = "" # colon-separated list; empty -> all under root
+whitelist = "" # colon-separated list of regex patterns applied to full folder paths; empty -> all under root
 local_playlist_template = "${folder_name}.m3u"
 remote_playlist_template = "${relative_path}"
 playlist_description_template = ""

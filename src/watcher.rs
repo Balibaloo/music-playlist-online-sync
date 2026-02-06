@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
+use regex::Regex;
 
 /// A node represents one folder: immediate children folders, and immediate track files.
 #[derive(Debug, Clone)]
@@ -33,7 +34,9 @@ impl FolderNode {
 pub struct InMemoryTree {
     pub root: PathBuf,
     pub nodes: HashMap<PathBuf, FolderNode>,
-    pub whitelist: Option<Vec<PathBuf>>,
+    /// Optional list of regex patterns applied to folder paths (as strings).
+    /// If set, only folders whose full path matches at least one pattern are included.
+    pub whitelist: Option<Vec<Regex>>,
 }
 
 /// Return true if the given path's extension matches any of the configured
@@ -66,18 +69,26 @@ fn path_matches_extensions(path: &Path, exts: &[String]) -> bool {
 }
 
 impl InMemoryTree {
-    /// Build the tree by scanning the filesystem under root (respecting optional whitelist)
-    /// and only including files whose extensions match the optional file_extensions whitelist.
+    /// Build the tree by scanning the filesystem under root.
+    /// - If `whitelist` is Some, it is treated as a colon-separated list of regex patterns
+    ///   evaluated against the full folder path (e.g. "/raid/.../My Folder"). Only
+    ///   directories whose path matches at least one pattern are included.
+    /// - Only files whose extensions match the optional file_extensions whitelist are kept.
     pub fn build(root: &Path, whitelist: Option<&str>, file_extensions: Option<&[String]>) -> anyhow::Result<Self> {
         let wl = whitelist.map(|s| {
             s.split(':')
-                .filter(|p| !p.is_empty())
-                .map(|p| {
-                    let mut pb = PathBuf::from(p);
-                    if pb.is_relative() {
-                        pb = root.join(pb);
+                .filter_map(|p| {
+                    let pat = p.trim();
+                    if pat.is_empty() {
+                        return None;
                     }
-                    pb
+                    match Regex::new(pat) {
+                        Ok(re) => Some(re),
+                        Err(e) => {
+                            warn!("Invalid whitelist regex pattern {:?}: {}", pat, e);
+                            None
+                        }
+                    }
                 })
                 .collect::<Vec<_>>()
         });
@@ -89,16 +100,10 @@ impl InMemoryTree {
         for entry in walker.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path().to_path_buf();
             if entry.file_type().is_dir() {
-                // if whitelist exists, skip dirs not under it
+                // if whitelist exists, skip dirs whose full path doesn't match any regex
                 if let Some(ref wlvec) = wl {
-                    let mut allowed = false;
-                    for w in wlvec {
-                        if path.starts_with(w) {
-                            allowed = true;
-                            break;
-                        }
-                    }
-                    if !allowed {
+                    let path_str = path.to_string_lossy();
+                    if !wlvec.iter().any(|re| re.is_match(&path_str)) {
                         continue;
                     }
                 }

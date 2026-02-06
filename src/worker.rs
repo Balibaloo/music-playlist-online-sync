@@ -266,7 +266,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
         }
 
-        // Resolve track URIs and build add/remove lists (reuse provider.search_track_uri)
+        // Resolve track URIs and build add/remove lists (prefer cache/ISRC when possible, then fallback to metadata search)
         let mut add_uris: Vec<String> = Vec::new();
         let mut remove_uris: Vec<String> = Vec::new();
         for (act, track_path_opt) in track_ops.into_iter() {
@@ -280,13 +280,95 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     }
                     continue;
                 }
+
+                // Try track cache first: reuse previously resolved URI and/or ISRC for this local path
+                let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking({
+                    let db_path = cfg.db_path.clone();
+                    let local_path = tp.clone();
+                    move || -> Result<Option<(Option<String>, Option<String>)>, anyhow::Error> {
+                        let conn = rusqlite::Connection::open(db_path)?;
+                        Ok(db::get_track_cache_by_local(&conn, &local_path)?)
+                    }
+                })
+                .await??;
+
+                if let Some((_cached_isrc, cached_remote_id)) = &cached {
+                    if let Some(uri) = cached_remote_id {
+                        match act {
+                            EventAction::Add => add_uris.push(uri.clone()),
+                            EventAction::Remove => remove_uris.push(uri.clone()),
+                            _ => {}
+                        }
+                        continue;
+                    }
+                }
+
+                // For Spotify, try to extract ISRC from local file metadata and perform an ISRC-based search
+                let mut isrc_for_lookup: Option<String> = cached.as_ref().and_then(|(i, _)| i.clone());
+                if isrc_for_lookup.is_none() && provider.name() == "spotify" {
+                    let p = std::path::Path::new(&tp).to_path_buf();
+                    let extracted = match tokio::task::spawn_blocking(move || crate::util::extract_isrc_from_path(&p)).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::warn!("ISRC extraction task failed for {}: {}", tp, e);
+                            None
+                        }
+                    };
+                    if let Some(code) = extracted {
+                        isrc_for_lookup = Some(code.clone());
+                        // persist locally extracted ISRC in cache (without remote id yet)
+                        let db_path = cfg.db_path.clone();
+                        let local_path = tp.clone();
+                        let code_for_cache = code.clone();
+                        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                            let conn = rusqlite::Connection::open(db_path)?;
+                            let _ = crate::db::upsert_track_cache(&conn, &local_path, Some(code_for_cache.as_str()), None)?;
+                            Ok(())
+                        })
+                        .await??;
+                    }
+                }
+
+                if let Some(isrc) = isrc_for_lookup.clone() {
+                    match provider.search_track_uri_by_isrc(&isrc).await {
+                        Ok(Some(uri)) => {
+                            match act {
+                                EventAction::Add => add_uris.push(uri.clone()),
+                                EventAction::Remove => remove_uris.push(uri.clone()),
+                                _ => {}
+                            }
+                            // Persist cache with ISRC + resolved URI
+                            let db_path = cfg.db_path.clone();
+                            let local_path = tp.clone();
+                            let uri_clone = uri.clone();
+                            let isrc_for_cache = isrc.clone();
+                            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                                let conn = rusqlite::Connection::open(db_path)?;
+                                let _ = crate::db::upsert_track_cache(&conn, &local_path, Some(isrc_for_cache.as_str()), Some(&uri_clone))?;
+                                Ok(())
+                            })
+                            .await??;
+                            continue;
+                        }
+                        #[allow(non_snake_case)]
+                        Ok(None) => {
+                            // fall through to metadata-based search
+                        }
+                        Err(e) => {
+                            log::warn!("Error searching by ISRC for {}: {}", tp, e);
+                            // fall through to metadata-based search
+                        }
+                    }
+                }
+
+                // Fallback: derive artist/title from filename and do provider metadata search
                 let fname = std::path::Path::new(&tp).file_name().and_then(|s| s.to_str()).unwrap_or("");
                 let (artist, title) = if let Some((a,t)) = fname.split_once(" - ") {
                     (a.trim(), t.trim().trim_end_matches(".mp3"))
                 } else {
                     ("", fname)
                 };
-                        match provider.search_track_uri(title, artist).await {
+                match provider.search_track_uri(title, artist).await {
                     Ok(Some(uri)) => {
                         match act {
                             EventAction::Add => add_uris.push(uri.clone()),

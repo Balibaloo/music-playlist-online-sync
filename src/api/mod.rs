@@ -28,6 +28,11 @@ pub trait Provider: Send + Sync {
     /// Search for a track by metadata: title, artist. Return a remote URI if found.
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>>;
 
+    /// Search for a track by ISRC, if supported by the provider. Default returns None.
+    async fn search_track_uri_by_isrc(&self, _isrc: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Lookup track metadata (e.g., ISRC) given a resolved URI. Default implementation returns None.
     async fn lookup_track_isrc(&self, _uri: &str) -> Result<Option<String>> {
         Ok(None)

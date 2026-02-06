@@ -392,6 +392,28 @@ impl Provider for SpotifyProvider {
         Ok(None)
     }
 
+    async fn search_track_uri_by_isrc(&self, isrc: &str) -> Result<Option<String>> {
+        let q = format!("isrc:{}", isrc);
+        let url = format!("{}/search?q={}&type=track&limit=1", Self::api_base(), urlencoding::encode(&q));
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, &self.get_bearer().await?)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let j: serde_json::Value = resp.json().await?;
+        if let Some(first) = j["tracks"]["items"].as_array().and_then(|a| a.get(0)) {
+            if let Some(uri) = first["uri"].as_str() {
+                return Ok(Some(uri.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     async fn lookup_track_isrc(&self, uri: &str) -> Result<Option<String>> {
         // Expect URIs like "spotify:track:{id}" or full spotify track URLs; extract id
         let id = if let Some(i) = uri.rsplit(':').next() {

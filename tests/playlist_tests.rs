@@ -20,19 +20,27 @@ fn flat_playlist_ordering() {
 
     let plist = root.join("out.m3u");
     // alphabetical order (default append)
-    playlist::write_flat_playlist(root, &plist, "append").unwrap();
+    playlist::write_flat_playlist(root, &plist, "append", &vec!["*.mp3".to_string()]).unwrap();
     let mut s = String::new();
     File::open(&plist).unwrap().read_to_string(&mut s).unwrap();
     let lines: Vec<&str> = s.lines().collect();
-    assert!(lines[0].contains("a_song.mp3"));
+    // M3U header
+    assert_eq!(lines[0], "#EXTM3U");
+    // First track should be a_song.mp3 (alphabetical)
+    assert!(lines[1].contains("#EXTINF"));
+    assert!(lines[1].contains("a_song.mp3"));
 
     // sync_order should list by modified time (a then b)
     let plist2 = root.join("out2.m3u");
-    playlist::write_flat_playlist(root, &plist2, "sync_order").unwrap();
+    playlist::write_flat_playlist(root, &plist2, "sync_order", &vec!["*.mp3".to_string()]).unwrap();
     let mut s2 = String::new();
     File::open(&plist2).unwrap().read_to_string(&mut s2).unwrap();
     let lines2: Vec<&str> = s2.lines().collect();
-    assert!(lines2[0].contains("a_song.mp3"));
+    // Header again
+    assert_eq!(lines2[0], "#EXTM3U");
+    // With sync_order we still expect a_song.mp3 to be first track
+    assert!(lines2[1].contains("#EXTINF"));
+    assert!(lines2[1].contains("a_song.mp3"));
 }
 
 #[test]

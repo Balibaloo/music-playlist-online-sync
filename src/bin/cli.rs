@@ -36,6 +36,8 @@ enum Commands {
         #[command(subcommand)]
         sub: AuthTestCommands,
     },
+    /// Show the status of the event queue
+    QueueStatus,
 }
 
 #[derive(Subcommand)]
@@ -244,6 +246,30 @@ async fn main() -> Result<()> {
                         })
                     };
                     run_auth_test("Tidal", list_playlists, ensure_playlist, rename_playlist).await?;
+                }
+            }
+        }
+        Commands::QueueStatus => {
+            let db_path = cfg.db_path.clone();
+            match rusqlite::Connection::open(&db_path) {
+                Ok(conn) => {
+                    match music_file_playlist_online_sync::db::fetch_unsynced_events(&conn) {
+                        Ok(events) => {
+                            println!("Queue contains {} unsynced event(s):", events.len());
+                            for event in events {
+                                println!("- id: {} | playlist: {} | action: {:?} | track: {:?} | extra: {:?} | synced: {} | ts: {}",
+                                    event.id, event.playlist_name, event.action, event.track_path, event.extra, event.is_synced, event.timestamp_ms);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to fetch queue events: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to open DB: {}", e);
+                    std::process::exit(1);
                 }
             }
         }

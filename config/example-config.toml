@@ -6,6 +6,7 @@ playlist_description_template = ""
 playlist_order_mode = "append" # "append" or "sync_order"
 playlist_mode = "flat" # "flat" or "linked"
 linked_reference_format = "relative"
+file_extensions = ["*.mp3", "*.flac", "*.ogg", "*.wav", "*.mp4", "*.m4a"]
 debounce_ms = 250
 log_dir = "/var/log/music-sync"
 token_refresh_interval = 3600

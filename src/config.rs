@@ -44,6 +44,11 @@ pub struct Config {
     // path to database file
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
+
+    /// Whitelist of file extensions to treat as track/media files.
+    /// Examples: ["*.mp3", "*.flac", "wav"]. Case-insensitive.
+    #[serde(default = "default_file_extensions")]
+    pub file_extensions: Vec<String>,
 }
 
 fn default_local_template() -> String { "${folder_name}.m3u".into() }
@@ -59,6 +64,20 @@ fn default_nightly_cron() -> String { "0 3 * * *".into() }
 fn default_max_retries() -> u32 { 3 }
 fn default_max_batch_spotify() -> usize { 100 }
 fn default_db_path() -> PathBuf { "/var/lib/music-sync/music-sync.db".into() }
+
+fn default_file_extensions() -> Vec<String> {
+    vec![
+        "*.mp3",
+        "*.flac",
+        "*.ogg",
+        "*.wav",
+        "*.mp4",
+        "*.m4a",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
 
 impl Config {
     pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {

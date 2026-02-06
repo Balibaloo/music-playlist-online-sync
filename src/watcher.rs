@@ -35,9 +35,39 @@ pub struct InMemoryTree {
     pub whitelist: Option<Vec<PathBuf>>,
 }
 
+/// Return true if the given path's extension matches any of the configured
+/// file_extensions patterns ("*.mp3", "mp3", ".mp3"), case-insensitive.
+fn path_matches_extensions(path: &Path, exts: &[String]) -> bool {
+    let ext_os = match path.extension() {
+        Some(e) => e,
+        None => return false,
+    };
+    let ext = match ext_os.to_str() {
+        Some(s) => s.to_ascii_lowercase(),
+        None => return false,
+    };
+    for pat in exts {
+        let mut p = pat.trim();
+        if p.is_empty() {
+            continue;
+        }
+        // strip common prefixes: "*." or "."
+        if let Some(stripped) = p.strip_prefix("*.") {
+            p = stripped;
+        } else if let Some(stripped) = p.strip_prefix('.') {
+            p = stripped;
+        }
+        if ext == p.to_ascii_lowercase() {
+            return true;
+        }
+    }
+    false
+}
+
 impl InMemoryTree {
-    /// Build the tree by scanning the filesystem under root (respecting optional whitelist).
-    pub fn build(root: &Path, whitelist: Option<&str>) -> anyhow::Result<Self> {
+    /// Build the tree by scanning the filesystem under root (respecting optional whitelist)
+    /// and only including files whose extensions match the optional file_extensions whitelist.
+    pub fn build(root: &Path, whitelist: Option<&str>, file_extensions: Option<&[String]>) -> anyhow::Result<Self> {
         let wl = whitelist.map(|s| {
             s.split(':')
                 .filter(|p| !p.is_empty())
@@ -73,10 +103,17 @@ impl InMemoryTree {
                 }
                 nodes.entry(path.clone()).or_insert_with(|| FolderNode::new(path));
             } else if entry.file_type().is_file() {
-                if let Some(parent) = entry.path().parent() {
-                    let parent = parent.to_path_buf();
-                    let node = nodes.entry(parent.clone()).or_insert_with(|| FolderNode::new(parent.clone()));
-                    node.tracks.insert(path.clone());
+                // If a file_extensions whitelist is provided, only include matching media files.
+                let allowed = match file_extensions {
+                    Some(exts) => path_matches_extensions(&path, exts),
+                    None => true,
+                };
+                if allowed {
+                    if let Some(parent) = entry.path().parent() {
+                        let parent = parent.to_path_buf();
+                        let node = nodes.entry(parent.clone()).or_insert_with(|| FolderNode::new(parent.clone()));
+                        node.tracks.insert(path.clone());
+                    }
                 }
             }
         }
@@ -232,8 +269,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     // Open DB (blocking)
     let _conn = db::open_or_create(&cfg.db_path)?;
 
-    // Build initial in-memory tree
-    let tree = InMemoryTree::build(&cfg.root_folder, if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) })?;
+    // Build initial in-memory tree, respecting optional whitelist and file_extensions
+    let tree = InMemoryTree::build(
+        &cfg.root_folder,
+        if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) },
+        Some(&cfg.file_extensions),
+    )?;
     info!("Initial scan complete: {} folders", tree.nodes.len());
 
     // Initial playlist writes (flat mode)
@@ -325,17 +366,17 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     }
 
     // Now wire up notify to feed events into the in-memory tree and debounce map.
-    {
-        let debounce_map = debounce_map.clone();
-        let tree = tree.clone();
-        let cfg_cb = cfg.clone();
-        let db_path = cfg_cb.db_path.clone();
+    let debounce_map_cb = debounce_map.clone();
+    let tree_cb = tree.clone();
+    let cfg_cb = cfg.clone();
+    let db_path = cfg_cb.db_path.clone();
 
-        // Create a RecommendedWatcher that will call our closure for each FS event.
-        let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(
+    // Create a RecommendedWatcher that will call our closure for each FS event.
+    let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(
             move |res: NotifyResult<NotifyEvent>| {
                 match res {
                     Ok(ev) => {
+                        info!("NotifyEvent received: kind={:?}, paths={:?}, attrs={:?}", ev.kind, ev.paths, ev.attrs);
                         // convert notify::Event into synthetic events and apply
                         let mut synths: Vec<SyntheticEvent> = Vec::new();
                         // If multiple paths provided it's often a rename; handle that first.
@@ -352,6 +393,13 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                             for path in ev.paths.iter() {
                                 let is_file = path.is_file();
                                 let is_dir = path.is_dir();
+
+                                // If a file_extensions whitelist is provided, only treat
+                                // matching media files as track events.
+                                if is_file && !path_matches_extensions(path, &cfg_cb.file_extensions) {
+                                    continue;
+                                }
+
                                 match &ev.kind {
                                     EventKind::Create(_) => {
                                         if is_file {
@@ -377,17 +425,21 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                 }
                             }
                         }
-
                         if !synths.is_empty() {
+                            info!("Applying {} synthetic event(s) derived from NotifyEvent", synths.len());
                             // apply to in-memory tree and enqueue DB events
-                            if let Ok(mut t) = tree.lock() {
+                            if let Ok(mut t) = tree_cb.lock() {
                                 for s in synths.into_iter() {
                                     let ops = t.apply_synthetic_event(s.clone());
+                                    if !ops.is_empty() {
+                                        info!("InMemoryTree produced {} logical op(s) for synthetic event {:?}", ops.len(), s);
+                                    }
                                     for op in ops {
                                         match op {
                                             LogicalOp::Add { playlist_folder, track_path } => {
+                                                info!("LogicalOp::Add playlist_folder={:?}, track_path={:?}", playlist_folder, track_path);
                                                 // set debounce for folder
-                                                if let Ok(mut dm) = debounce_map.lock() {
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
                                                     dm.insert(playlist_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
                                                     // also propagate debounce to ancestor folders so linked playlists rebuild
                                                     if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
@@ -414,7 +466,8 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 });
                                             }
                                             LogicalOp::Remove { playlist_folder, track_path } => {
-                                                if let Ok(mut dm) = debounce_map.lock() {
+                                                info!("LogicalOp::Remove playlist_folder={:?}, track_path={:?}", playlist_folder, track_path);
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
                                                     dm.insert(playlist_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
                                                     if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
                                                         while p.starts_with(&cfg_cb.root_folder) {
@@ -439,7 +492,8 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 });
                                             }
                                             LogicalOp::Create { playlist_folder } | LogicalOp::Delete { playlist_folder } => {
-                                                if let Ok(mut dm) = debounce_map.lock() {
+                                                info!("LogicalOp::{}/Delete playlist_folder={:?}", "Create", playlist_folder);
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
                                                     dm.insert(playlist_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
                                                     if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
                                                         while p.starts_with(&cfg_cb.root_folder) {
@@ -453,8 +507,9 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
                                             }
                                             LogicalOp::PlaylistRename { from_folder, to_folder } => {
+                                                info!("LogicalOp::PlaylistRename from_folder={:?}, to_folder={:?}", from_folder, to_folder);
                                                 // debounce both source and destination folders and ancestors
-                                                if let Ok(mut dm) = debounce_map.lock() {
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
                                                     dm.insert(from_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
                                                     dm.insert(to_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
                                                     if let Some(mut p) = from_folder.parent().map(|x| x.to_path_buf()) {
@@ -522,17 +577,17 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
             }
         };
 
-        // start watching root folder recursively
-        if let Err(e) = watcher.watch(&cfg.root_folder, RecursiveMode::Recursive) {
-            warn!("Failed to start watcher for {:?}: {}", cfg.root_folder, e);
-        }
-        // keep watcher in scope; it will run for the lifetime of this function
+    // start watching root folder recursively
+    if let Err(e) = watcher.watch(&cfg.root_folder, RecursiveMode::Recursive) {
+        warn!("Failed to start watcher for {:?}: {}", cfg.root_folder, e);
+    } else {
+        info!("File watcher started on root {:?}", cfg.root_folder);
     }
+    // keep watcher in scope; it will run for the lifetime of this function
 
-    // NOTE: notify watcher integration omitted in this minimal bootstrap; the long-running
-    // watcher will initially write playlists and spawn debounce worker above. For full
-    // functionality the notify::RecommendedWatcher should be created and events mapped to
-    // debounce_map updates.
-
-    Ok(())
+    // Block indefinitely so the watcher process stays alive and can
+    // continue receiving filesystem events.
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
 }

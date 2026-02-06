@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_log::LogTracer;
 use tracing_appender::rolling::RollingFileAppender;
 use anyhow::Result;
 use music_file_playlist_online_sync as lib;
@@ -75,12 +77,20 @@ async fn main() -> Result<()> {
 
     // Initialize structured logging to a daily rolling file in the configured log dir.
     // Keep the _guard alive for the duration of the process so the non-blocking writer flushes on drop.
-    let file_appender: RollingFileAppender = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(non_blocking)
-        .init();
+        // Initialize log->tracing bridge and structured logging to a daily rolling file in the configured log dir.
+        // Keep the _guard alive for the duration of the process so the non-blocking writer flushes on drop.
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        let file_appender: RollingFileAppender = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
+        let writer = non_blocking.and(stdout);
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(writer)
+            .finish()
+            .try_init()
+            .expect("Failed to set tracing subscriber");
+        LogTracer::init().ok();
 
     match cli.command {
         Commands::Watcher => {

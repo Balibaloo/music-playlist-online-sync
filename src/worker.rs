@@ -355,7 +355,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 /// Nightly reconciliation: scan the root folder, write playlists for every folder,
 /// and enqueue a `Create` event so the worker will reconcile remote playlists later.
 pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
-    let tree = crate::watcher::InMemoryTree::build(&cfg.root_folder, if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) })?;
+    let tree = crate::watcher::InMemoryTree::build(
+        &cfg.root_folder,
+        if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) },
+        Some(&cfg.file_extensions),
+    )?;
     // collect thread handles for the enqueue operations so we can join before returning
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
     for (folder, _node) in tree.nodes.iter() {

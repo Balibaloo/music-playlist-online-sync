@@ -74,6 +74,15 @@ pub fn fetch_unsynced_events(conn: &Connection) -> Result<Vec<Event>> {
     Ok(v)
 }
 
+/// Clear all unsynced events from the event_queue table.
+/// Returns the number of rows removed.
+pub fn clear_unsynced_events(conn: &mut Connection) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let removed = tx.execute("DELETE FROM event_queue WHERE is_synced = 0", [])?;
+    tx.commit()?;
+    Ok(removed)
+}
+
 pub fn mark_events_synced(conn: &mut Connection, ids: &[i64]) -> Result<()> {
     let tx = conn.transaction()?;
     for id in ids {

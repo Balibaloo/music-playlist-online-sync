@@ -40,6 +40,8 @@ enum Commands {
     },
     /// Show the status of the event queue
     QueueStatus,
+    /// Clear all unsynced events from the event queue
+    QueueClear,
 }
 
 #[derive(Subcommand)]
@@ -273,6 +275,26 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             eprintln!("Failed to fetch queue events: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to open DB: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::QueueClear => {
+            let db_path = cfg.db_path.clone();
+            match rusqlite::Connection::open(&db_path) {
+                Ok(mut conn) => {
+                    match music_file_playlist_online_sync::db::clear_unsynced_events(&mut conn) {
+                        Ok(removed) => {
+                            println!("Cleared {} unsynced event(s) from the queue.", removed);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to clear queue events: {}", e);
                             std::process::exit(1);
                         }
                     }

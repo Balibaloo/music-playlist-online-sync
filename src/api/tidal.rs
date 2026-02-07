@@ -432,6 +432,90 @@ impl TidalProvider {
         Ok(result)
     }
 
+    /// List all track ids for a given TIDAL playlist.
+    async fn list_playlist_track_ids(&self, playlist_id: &str) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        let base = Self::base_url();
+        let bearer = self.get_bearer().await?;
+        let cc = Self::country_code();
+        let mut next_url = format!(
+            "{}/playlists/{}/items?countryCode={}",
+            base, playlist_id, cc
+        );
+
+        loop {
+            let resp = self
+                .client
+                .get(&next_url)
+                .header(AUTHORIZATION, &bearer)
+                .send()
+                .await?;
+
+            let status = resp.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                // TIDAL returns 404 for playlists with no items; treat that
+                // as an empty playlist rather than an error so that
+                // reconciliation can proceed to add tracks.
+                return Ok(Vec::new());
+            }
+            if !status.is_success() {
+                let txt = resp.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Failed to list TIDAL playlist items for {}: {} => {}",
+                    playlist_id,
+                    status,
+                    txt
+                ));
+            }
+
+            let j: serde_json::Value = resp.json().await?;
+
+            if let Some(items) = j.get("data").and_then(|d| d.as_array()) {
+                for item in items {
+                    let track_id_opt = item
+                        .get("relationships")
+                        .and_then(|r| r.get("track"))
+                        .and_then(|t| t.get("data"))
+                        .and_then(|d| d.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            item.get("attributes")
+                                .and_then(|a| a.get("trackId").or_else(|| a.get("trackID")))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        });
+
+                    if let Some(id) = track_id_opt {
+                        out.push(id);
+                    }
+                }
+            }
+
+            if let Some(next) = j
+                .get("links")
+                .and_then(|l| l.get("next"))
+                .and_then(|v| v.as_str())
+            {
+                if next.is_empty() {
+                    break;
+                }
+                next_url = if next.starts_with("http") {
+                    next.to_string()
+                } else {
+                    format!("{}{}", base, next)
+                };
+            } else {
+                break;
+            }
+        }
+
+        // Deduplicate while preserving order.
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|id| seen.insert(id.clone()));
+        Ok(out)
+    }
+
     /// Return the configured root folder name (trimmed) if any.
     fn root_folder(&self) -> Option<String> {
         self
@@ -447,9 +531,10 @@ impl TidalProvider {
     ///
     /// If no root folder name is configured, this is a no-op and returns Ok(None).
     async fn ensure_root_folder(&self) -> Result<Option<String>> {
-        let name = match self.root_folder() {
-            Some(n) => n,
-            None => return Ok(None),
+        let name = if let Some(n) = self.root_folder() {
+            n
+        } else {
+            return Ok(None);
         };
 
         // Fast path: return cached id if we already resolved it.
@@ -536,9 +621,10 @@ impl TidalProvider {
 
     /// Add a playlist to the configured root folder's items relationship.
     async fn add_playlist_to_root_folder(&self, playlist_id: &str) -> Result<()> {
-        let folder_id = match self.ensure_root_folder().await? {
-            Some(id) => id,
-            None => return Ok(()),
+        let folder_id = if let Some(id) = self.ensure_root_folder().await? {
+            id
+        } else {
+            return Ok(());
         };
 
         let base = Self::base_url();
@@ -934,5 +1020,11 @@ impl Provider for TidalProvider {
             return Err(anyhow!("tidal delete playlist failed: {} => {}", status, txt));
         }
         Ok(())
+    }
+
+    async fn list_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<String>> {
+        // For TIDAL we expose track ids as opaque "URIs"; reconciliation
+        // logic only cares about set equality, not the scheme itself.
+        self.list_playlist_track_ids(playlist_id).await
     }
 }

@@ -26,6 +26,10 @@ pub trait Provider: Send + Sync {
     /// Delete a playlist entirely on the provider side
     async fn delete_playlist(&self, playlist_id: &str) -> Result<()>;
 
+    /// List all track URIs currently in a remote playlist.
+    /// Implementations should return a de-duplicated, stable list.
+    async fn list_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<String>>;
+
     /// Search for a track by metadata: title, artist. Return a remote URI if found.
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>>;
 
@@ -37,6 +41,17 @@ pub trait Provider: Send + Sync {
     /// Lookup track metadata (e.g., ISRC) given a resolved URI. Default implementation returns None.
     async fn lookup_track_isrc(&self, _uri: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    /// Return true if the given playlist id still refers to a valid,
+    /// accessible playlist on the provider. The default implementation
+    /// assumes playlists remain valid forever and always returns true.
+    ///
+    /// Providers like Spotify that treat "delete" as an "unfollow" can
+    /// override this to detect when the current user no longer has access
+    /// to the playlist so callers can recreate it.
+    async fn playlist_is_valid(&self, _playlist_id: &str) -> Result<bool> {
+        Ok(true)
     }
     /// Return the provider's name (for logging, UI, etc)
     fn name(&self) -> &str;

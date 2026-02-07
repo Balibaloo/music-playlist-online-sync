@@ -4,6 +4,8 @@ use tracing_subscriber;
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::prelude::*;
 use tracing_appender::rolling::RollingFileAppender;
+use tracing_log::LogTracer;
+use tracing::subscriber as tracing_subscriber_global;
 use anyhow::Result;
 use music_file_playlist_online_sync as lib;
 use lib::api::Provider;
@@ -69,6 +71,7 @@ async fn main() -> Result<()> {
 
     // Initialize log->tracing bridge and structured logging.
     // Logs go to both stdout and a daily-rotated file in cfg.log_dir.
+    let _ = LogTracer::init();
     let file_appender: RollingFileAppender = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
@@ -78,11 +81,15 @@ async fn main() -> Result<()> {
     let file_layer = fmt::layer().with_writer(non_blocking);
     let stdout_layer = fmt::layer().with_writer(std::io::stdout);
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(env_filter)
         .with(file_layer)
-        .with(stdout_layer)
-        .init();
+        .with(stdout_layer);
+
+    // Install as global default tracing subscriber without triggering
+    // tracing-subscriber’s internal log bridge (we already call LogTracer).
+    tracing_subscriber_global::set_global_default(subscriber)
+        .expect("failed to set global tracing subscriber");
 
     match cli.command {
         Commands::Watcher => {

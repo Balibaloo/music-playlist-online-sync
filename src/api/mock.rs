@@ -56,4 +56,14 @@ impl Provider for MockProvider {
         info!("MockProvider: search {} - {}", title, artist);
         Ok(Some(format!("mock:track:{}:{}", title, artist)))
     }
+
+    async fn list_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<String>> {
+        info!("MockProvider: list_playlist_tracks {}", playlist_id);
+        Ok(Vec::new())
+    }
+
+    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<bool> {
+        info!("MockProvider: playlist_is_valid {}", playlist_id);
+        Ok(true)
+    }
 }

@@ -33,6 +33,123 @@ pub struct SpotifyProvider {
 }
 
 impl SpotifyProvider {
+    /// Check whether the current user still has access to the given
+    /// playlist id. This is used to detect the case where a playlist
+    /// was "deleted" (unfollowed) in the Spotify client while our
+    /// local mapping still points at the old id.
+    async fn playlist_is_accessible(&self, playlist_id: &str) -> Result<bool> {
+        // First, check whether the playlist id is still visible in the
+        // current user's playlist library. This matches what the user sees
+        // in the Spotify UI: if they've "deleted" (unfollowed) the playlist,
+        // it will no longer appear in /users/{id}/playlists.
+        let playlists = self.list_user_playlists().await?;
+        let in_library = playlists.iter().any(|(id, _name)| id == playlist_id);
+        if !in_library {
+            debug!(
+                "Spotify playlist {} no longer present in user library; treating mapping as invalid",
+                playlist_id
+            );
+            return Ok(false);
+        }
+
+        // As an extra safety check, confirm the playlist is still accessible
+        // via the generic playlist endpoint.
+        let bearer = self.get_bearer().await?;
+        let url = format!("{}/playlists/{}", Self::api_base(), playlist_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status.as_u16() == 401 {
+            // Try once more after refreshing token.
+            self.ensure_token().await?;
+            let bearer2 = self.get_bearer().await?;
+            let resp2 = self
+                .client
+                .get(&url)
+                .header(AUTHORIZATION, &bearer2)
+                .send()
+                .await?;
+            let st2 = resp2.status();
+            if st2.is_success() {
+                return Ok(true);
+            }
+            // 404/403 after refresh -> treat as invalid mapping.
+            if st2 == reqwest::StatusCode::NOT_FOUND
+                || st2 == reqwest::StatusCode::FORBIDDEN
+            {
+                debug!(
+                    "Spotify playlist {} not accessible after refresh (status {}); treating as invalid",
+                    playlist_id,
+                    st2
+                );
+                return Ok(false);
+            }
+            return Err(anyhow!(
+                "playlist_is_accessible failed after refresh: {}",
+                st2
+            ));
+        }
+
+        // 404/403 without needing refresh means the playlist either no
+        // longer exists or the user no longer has access to it.
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            debug!(
+                "Spotify playlist {} not accessible (status {}); treating as invalid",
+                playlist_id,
+                status
+            );
+            return Ok(false);
+        }
+
+        Err(anyhow!("playlist_is_accessible failed: {}", status))
+    }
+    /// List all track URIs for a given Spotify playlist.
+    async fn list_playlist_tracks_internal(&self, playlist_id: &str) -> Result<Vec<String>> {
+        let mut uris = Vec::new();
+        let mut next: Option<String> = Some(format!(
+            "{}/playlists/{}/tracks?fields=items(track(uri)),next&limit=100",
+            Self::api_base(),
+            playlist_id
+        ));
+
+        while let Some(url) = next {
+            let bearer = self.get_bearer().await?;
+            let resp = self
+                .client
+                .get(&url)
+                .header(AUTHORIZATION, &bearer)
+                .send()
+                .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let txt = resp.text().await.unwrap_or_default();
+                return Err(anyhow!("list playlist tracks failed: {} => {}", status, txt));
+            }
+            let j: serde_json::Value = resp.json().await?;
+            if let Some(items) = j["items"].as_array() {
+                for it in items {
+                    if let Some(uri) = it["track"]["uri"].as_str() {
+                        uris.push(uri.to_string());
+                    }
+                }
+            }
+            next = j["next"].as_str().map(|s| s.to_string());
+        }
+
+        // Deduplicate while preserving order.
+        let mut seen = std::collections::HashSet::new();
+        uris.retain(|u| seen.insert(u.clone()));
+        Ok(uris)
+    }
         /// List all playlists for the authenticated user
         pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
         let user_id = self.get_user_id().await?;
@@ -388,6 +505,14 @@ impl Provider for SpotifyProvider {
             return Err(anyhow!("delete playlist failed: {}", resp.status()));
         }
         Ok(())
+    }
+
+    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<bool> {
+        self.playlist_is_accessible(playlist_id).await
+    }
+
+    async fn list_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<String>> {
+        self.list_playlist_tracks_internal(playlist_id).await
     }
 
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>> {

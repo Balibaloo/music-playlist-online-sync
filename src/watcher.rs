@@ -71,6 +71,23 @@ fn path_matches_extensions(path: &Path, exts: &[String]) -> bool {
     false
 }
 
+/// Return true if the path lies inside a Samba temporary folder such as
+/// ".::TMPNAME:...", which should be ignored for playlist purposes.
+fn is_smb_temp_path(path: &Path) -> bool {
+    use std::path::Component;
+
+    for comp in path.components() {
+        if let Component::Normal(os) = comp {
+            if let Some(s) = os.to_str() {
+                if s.starts_with(".::TMPNAME:") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 impl InMemoryTree {
     /// Build the tree by scanning the filesystem under root.
     /// - If `whitelist` is Some, it is treated as a colon-separated list of regex patterns
@@ -102,6 +119,9 @@ impl InMemoryTree {
 
         for entry in walker.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path().to_path_buf();
+            if is_smb_temp_path(&path) {
+                continue;
+            }
             if entry.file_type().is_dir() {
                 // if whitelist exists, skip dirs whose full path doesn't match any regex
                 if let Some(ref wlvec) = wl {
@@ -150,11 +170,38 @@ impl InMemoryTree {
 
     /// Helper to find the folder node nearest ancestor for a file path.
     pub fn folder_for_path(&self, path: &Path) -> Option<PathBuf> {
-        let mut p = if path.is_dir() { path.to_path_buf() } else { path.parent().map(|x| x.to_path_buf())? };
+        let mut p = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent().map(|x| x.to_path_buf())?
+        };
+
         loop {
-            if self.nodes.contains_key(&p) {
-                return Some(p);
+            // Only consider paths under the configured root.
+            if !p.starts_with(&self.root) {
+                break;
             }
+
+            // If we already have a node for this folder, use it.
+            if self.nodes.contains_key(&p) {
+                return Some(p.clone());
+            }
+
+            // Otherwise, if this folder is allowed by the whitelist (or there
+            // is no whitelist), treat it as a valid playlist folder even if we
+            // haven't created a node yet. The caller will then create the node
+            // on demand.
+            let allowed = if let Some(ref wlvec) = self.whitelist {
+                let path_str = p.to_string_lossy();
+                wlvec.iter().any(|re| re.is_match(&path_str))
+            } else {
+                true
+            };
+
+            if allowed {
+                return Some(p.clone());
+            }
+
             if p == self.root {
                 break;
             }
@@ -420,17 +467,34 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                         info!("NotifyEvent received: kind={:?}, paths={:?}, attrs={:?}", ev.kind, ev.paths, ev.attrs);
                         // convert notify::Event into synthetic events and apply
                         let mut synths: Vec<SyntheticEvent> = Vec::new();
-                        // If multiple paths provided it's often a rename; handle that first.
+                        // If multiple paths provided it's often a rename; try to distinguish
+                        // folder vs file rename using the in-memory tree when possible.
                         if ev.paths.len() >= 2 {
                             let from = ev.paths[0].clone();
                             let to = ev.paths[1].clone();
-                            if from.is_dir() || to.is_dir() {
+
+                            // Ignore Samba temporary paths entirely.
+                            if is_smb_temp_path(&from) || is_smb_temp_path(&to) {
+                                return;
+                            }
+
+                            let mut treat_as_folder_rename = false;
+                            if let Ok(t) = tree_cb.lock() {
+                                if t.nodes.contains_key(&from) || t.nodes.contains_key(&to) {
+                                    treat_as_folder_rename = true;
+                                }
+                            }
+
+                            if treat_as_folder_rename {
                                 synths.push(SyntheticEvent::FolderRename { from, to });
                             } else {
                                 synths.push(SyntheticEvent::FileRename { from, to });
                             }
                         } else {
                             for path in ev.paths.iter() {
+                                if is_smb_temp_path(path) {
+                                    continue;
+                                }
                                 let is_file = path.is_file();
                                 let is_dir = path.is_dir();
 

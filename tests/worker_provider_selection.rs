@@ -20,6 +20,8 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
         whitelist: String::new(),
         local_playlist_template: "${folder_name}.m3u".into(),
         remote_playlist_template: "${relative_path}".into(),
+        remote_playlist_template_flat: String::new(),
+        remote_playlist_template_folders: String::new(),
         playlist_description_template: String::new(),
         playlist_order_mode: "append".into(),
         playlist_mode: "flat".into(),
@@ -32,11 +34,15 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
         queue_length_stop_cloud_sync_threshold: None,
         max_retries_on_error: 3,
         max_batch_size_spotify: 100,
+        file_extensions: vec!["*.mp3".into()],
+        online_root_playlist: String::new(),
+        online_playlist_structure: "flat".into(),
+        online_folder_flattening_delimiter: String::new(),
         db_path: db_path.clone(),
     };
 
     // run worker once
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move { run_worker_once(&cfg).await.unwrap() });
 
     // verify event is NOT marked synced (since no real provider is configured)

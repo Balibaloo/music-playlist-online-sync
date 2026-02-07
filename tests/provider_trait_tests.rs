@@ -16,7 +16,7 @@ fn test_spotify_provider_trait() {
 
 #[test]
 fn test_tidal_provider_trait() {
-    let tidal = TidalProvider::new("client_id".to_string(), "client_secret".to_string(), std::path::PathBuf::from("/tmp/db"));
+    let tidal = TidalProvider::new("client_id".to_string(), "client_secret".to_string(), std::path::PathBuf::from("/tmp/db"), None);
     assert_eq!(tidal.name(), "tidal");
     assert!(tidal.is_authenticated());
 }
@@ -29,7 +29,7 @@ fn test_spotify_provider_not_authenticated() {
 
 #[test]
 fn test_tidal_provider_not_authenticated() {
-    let tidal = TidalProvider::new("".to_string(), "".to_string(), std::path::PathBuf::from("/tmp/db"));
+    let tidal = TidalProvider::new("".to_string(), "".to_string(), std::path::PathBuf::from("/tmp/db"), None);
     assert!(!tidal.is_authenticated());
 }
 
@@ -67,7 +67,7 @@ async fn test_provider_auth_playlist_ops() {
 
     // Tidal
     if !tidal_id.is_empty() && !tidal_secret.is_empty() {
-        let tidal = TidalProvider::new(tidal_id.clone(), tidal_secret.clone(), PathBuf::from(&db_path));
+        let tidal = TidalProvider::new(tidal_id.clone(), tidal_secret.clone(), PathBuf::from(&db_path), None);
         let playlists = tidal.list_user_playlists().await.expect("Tidal list playlists");
         println!("Tidal playlists: {:?}", playlists);
         let mut max_n = 0;

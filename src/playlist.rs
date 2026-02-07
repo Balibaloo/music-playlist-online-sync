@@ -102,10 +102,12 @@ pub fn write_linked_playlist(target_folder: &Path, playlist_path: &Path, linked_
 
     use std::io::Write;
     for child in children.iter() {
-        // child playlist filename based on template
+        // child playlist filename based on template; for linked playlists,
+        // the logical parent is the current target_folder, so path_to_parent
+        // is empty and folder_name identifies the child.
         let folder_name = child.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let rel = child.display().to_string();
-        let child_playlist_name = crate::util::expand_template(local_playlist_template, folder_name, &rel);
+        let path_to_parent = String::new();
+        let child_playlist_name = crate::util::expand_template(local_playlist_template, folder_name, &path_to_parent);
         let child_playlist_path = child.join(child_playlist_name);
         let line = if linked_reference_format == "absolute" {
             child_playlist_path.display().to_string()

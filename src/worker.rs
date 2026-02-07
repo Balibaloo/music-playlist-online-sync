@@ -8,6 +8,123 @@ use anyhow::Result;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Return true if the given provider supports hierarchical playlist folders.
+/// Some providers (e.g. Tidal) do not expose folder nesting via their APIs
+/// and must be treated as flat for naming purposes.
+fn provider_supports_folder_nesting(provider_name: &str) -> bool {
+    match provider_name {
+        "tidal" => false,
+        _ => true,
+    }
+}
+
+/// Compute the display name to use for a remote playlist on a given provider,
+/// based on the logical playlist key and configuration.
+///
+/// This function is responsible for:
+/// - Applying an optional `online_root_playlist` under which all remote
+///   playlists are logically nested.
+/// - Respecting `online_playlist_structure` ("flat" or "folders").
+/// - Using `online_folder_flattening_delimiter` when flattening hierarchies
+///   into a single playlist name.
+/// - Applying the appropriate remote playlist template based on structure:
+///   `remote_playlist_template_flat` or `remote_playlist_template_folders`.
+///   When these are empty, it falls back to `remote_playlist_template` and
+///   finally to the raw logical name.
+///
+/// Placeholders inside the templates are expanded via `util::expand_template`:
+/// - "${folder_name}"    -> the final path segment of the logical playlist
+///                            key (e.g. "Album1").
+/// - "${path_to_parent}" -> the logical path to the playlist folder's
+///                            parent, including `online_root_playlist` when
+///                            set. For flat mode, when
+///                            `online_folder_flattening_delimiter` is non-
+///                            empty, filesystem separators in this path are
+///                            replaced by that delimiter.
+/// - "${relative_path}"  -> legacy alias, expanded as
+///                            `path_to_parent + folder_name` so that existing
+///                            configs continue to work.
+fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key: &str) -> String {
+    let root = cfg.online_root_playlist.trim();
+    let structure = cfg.online_playlist_structure.as_str();
+    let delim_cfg = cfg.online_folder_flattening_delimiter.as_str();
+    let supports_folders = provider_supports_folder_nesting(provider_name);
+
+    // Normalize the logical playlist key to use "/" as a separator so we
+    // can split it into parent path and folder_name. Existing databases may
+    // still contain old keys like "Album1.m3u"; for those, parent will be
+    // empty and folder_name will be the whole string.
+    let normalized = playlist_key.replace('\\', "/").trim_matches('/').to_string();
+    let normalized_str = normalized.as_str();
+    let (parent_rel, folder_name) = if let Some((p, f)) = normalized_str.rsplit_once('/') {
+        (p.to_string(), f.to_string())
+    } else {
+        (String::new(), normalized_str.to_string())
+    };
+
+    // Build a filesystem-style logical path to the playlist folder's parent,
+    // starting from the optional online_root_playlist.
+    let mut path_to_parent_fs = String::new();
+    if !root.is_empty() {
+        path_to_parent_fs.push_str(root);
+        path_to_parent_fs.push('/');
+    }
+    if !parent_rel.is_empty() {
+        path_to_parent_fs.push_str(&parent_rel);
+        path_to_parent_fs.push('/');
+    }
+
+    // Decide whether this provider will actually use folder-style structure.
+    let is_folder_style = structure == "folders" && supports_folders;
+
+    // Choose template based on effective structure, falling back to the
+    // legacy `remote_playlist_template` if the structure-specific template
+    // is empty.
+    let template = if is_folder_style {
+        if !cfg.remote_playlist_template_folders.is_empty() {
+            cfg.remote_playlist_template_folders.as_str()
+        } else {
+            cfg.remote_playlist_template.as_str()
+        }
+    } else {
+        if !cfg.remote_playlist_template_flat.is_empty() {
+            cfg.remote_playlist_template_flat.as_str()
+        } else {
+            cfg.remote_playlist_template.as_str()
+        }
+    };
+
+    if template.is_empty() {
+        // No templates configured; fall back to a simple logical path that
+        // includes the root (if any) and the key.
+        if !root.is_empty() {
+            if normalized_str.is_empty() {
+                return root.to_string();
+            }
+            return format!("{}/{}", root, normalized_str);
+        }
+        return normalized_str.to_string();
+    }
+
+    // For flat structure (or providers without folder support), optionally
+    // flatten the path_to_parent using the configured delimiter.
+    let path_to_parent = if !is_folder_style && !delim_cfg.is_empty() {
+        let delim = delim_cfg;
+        if path_to_parent_fs.is_empty() {
+            String::new()
+        } else {
+            // Replace "/" separators with the delimiter, preserving
+            // trailing position so that `path_to_parent + folder_name`
+            // yields the logical path to the playlist folder.
+            path_to_parent_fs.replace('/', delim)
+        }
+    } else {
+        path_to_parent_fs
+    };
+
+    crate::util::expand_template(template, &folder_name, &path_to_parent)
+}
+
 /// Worker orchestration: read unsynced events, group by playlist, collapse, apply rename then track adds/removes.
 /// Adds per-playlist processing lease to avoid concurrent workers processing the same playlist.
 pub async fn run_worker_once(cfg: &Config) -> Result<()> {
@@ -67,7 +184,19 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     .await??;
     if has_tidal {
         log::info!("Using Tidal provider");
-        providers.push(("tidal".to_string(), Arc::new(TidalProvider::new(String::new(), String::new(), cfg.db_path.clone()))));
+        providers.push((
+            "tidal".to_string(),
+            Arc::new(TidalProvider::new(
+                String::new(),
+                String::new(),
+                cfg.db_path.clone(),
+                if cfg.online_root_playlist.trim().is_empty() {
+                    None
+                } else {
+                    Some(cfg.online_root_playlist.clone())
+                },
+            )),
+        ));
     }
     // If no real providers, do not consume the queue
     if providers.is_empty() {
@@ -77,8 +206,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
     // Group events per playlist_name
     use std::collections::HashMap;
-    let mut groups: HashMap<String, Vec<Event>> = HashMap::new();
-    for ev in events.into_iter() {
+        let mut groups: HashMap<String, Vec<Event>> = HashMap::new();
+        for ev in events.into_iter() {
         groups.entry(ev.playlist_name.clone()).or_default().push(ev);
     }
 
@@ -132,13 +261,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             original_ids.push(e.id);
         }
 
-        // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed)
+        // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed).
         let remote_id_opt = tokio::task::spawn_blocking({
             let db_path = cfg.db_path.clone();
             let pl = playlist_name.clone();
+            let prov = provider.name().to_string();
             move || -> Result<Option<String>, anyhow::Error> {
                 let conn = rusqlite::Connection::open(db_path)?;
-                db::get_remote_playlist_id(&conn, &pl).map_err(|e| e.into())
+                db::get_remote_playlist_id(&conn, &prov, &pl).map_err(|e| e.into())
             }
         })
         .await??;
@@ -175,9 +305,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             // Remove local playlist_map entry regardless of whether remote deletion succeeded
             let pl = playlist_name.clone();
             let db_path = cfg.db_path.clone();
+            let prov = provider.name().to_string();
             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(db_path)?;
-                let _ = db::delete_playlist_map(&conn, &pl)?;
+                let _ = db::delete_playlist_map(&conn, &prov, &pl)?;
                 Ok(())
             })
             .await??;
@@ -207,19 +338,23 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             continue;
         }
 
-        let remote_id = if let Some(rid) = remote_id_opt {
+        // Compute the desired remote display name for this playlist on this provider.
+        let remote_display_name = compute_remote_playlist_name(cfg, provider.name(), playlist_name);
+
+        let mut remote_id = if let Some(rid) = remote_id_opt {
             rid
         } else {
             // create via provider.ensure_playlist
-            match provider.ensure_playlist(&playlist_name, "").await {
+            match provider.ensure_playlist(&remote_display_name, "").await {
                 Ok(rid) => {
                     // persist
                     let pl = playlist_name.clone();
                     let db_path = cfg.db_path.clone();
                     let rid_clone = rid.clone();
+                    let prov = provider.name().to_string();
                     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                         let conn = rusqlite::Connection::open(db_path)?;
-                        db::upsert_playlist_map(&conn, &pl, &rid_clone)?;
+                        db::upsert_playlist_map(&conn, &prov, &pl, &rid_clone)?;
                         Ok(())
                     })
                     .await??;
@@ -240,15 +375,62 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
         };
 
-        // Apply rename first
-        if let Some((_from, to)) = rename_opt {
+        // If there was no explicit rename event for this playlist, still
+        // ensure that the remote playlist's display name matches what we
+        // compute from configuration (e.g. to apply `online_root_playlist`
+        // to playlists that were created before this option was enabled).
+        //
+        // We only attempt this if the desired remote display name differs
+        // from the logical local playlist name to avoid unnecessary rename
+        // calls when no online naming options are in use.
+        if rename_opt.is_none() && remote_display_name != *playlist_name {
             let mut attempt = 0u32;
             loop {
                 attempt += 1;
-                let res = provider.rename_playlist(&remote_id, &to).await;
+                let res = provider.rename_playlist(&remote_id, &remote_display_name).await;
                 match res {
                     Ok(_) => {
-                        log::info!("Renamed remote playlist {} -> {}", remote_id, to);
+                        log::info!(
+                            "Ensured remote playlist {} has display name {}",
+                            remote_id,
+                            remote_display_name
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt >= cfg.max_retries_on_error {
+                            log::error!(
+                                "Config-driven rename failed after {} attempts: {}",
+                                attempt,
+                                e
+                            );
+                            break;
+                        } else {
+                            let exp = std::cmp::min(1u64 << attempt, 60);
+                            log::warn!(
+                                "Config-driven rename attempt {} failed: {}. Retrying in {}s...",
+                                attempt,
+                                e,
+                                exp
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply rename first
+        if let Some((_from, to)) = rename_opt {
+            let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to);
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                let res = provider.rename_playlist(&remote_id, &new_remote_name).await;
+                match res {
+                    Ok(_) => {
+                        log::info!("Renamed remote playlist {} -> {}", remote_id, new_remote_name);
                         // update playlist_map name? Here we keep playlist_name as local key; remote_id unchanged.
                         break;
                     }
@@ -285,9 +467,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking({
                     let db_path = cfg.db_path.clone();
                     let local_path = tp.clone();
+                    let provider_name = provider.name().to_string();
                     move || -> Result<Option<(Option<String>, Option<String>)>, anyhow::Error> {
                         let conn = rusqlite::Connection::open(db_path)?;
-                        Ok(db::get_track_cache_by_local(&conn, &local_path)?)
+                        Ok(db::get_track_cache_by_local(&conn, &provider_name, &local_path)?)
                     }
                 })
                 .await??;
@@ -303,9 +486,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     }
                 }
 
-                // For Spotify, try to extract ISRC from local file metadata and perform an ISRC-based search
+                // Try to extract ISRC from local file metadata and perform an ISRC-based search
                 let mut isrc_for_lookup: Option<String> = cached.as_ref().and_then(|(i, _)| i.clone());
-                if isrc_for_lookup.is_none() && provider.name() == "spotify" {
+                if isrc_for_lookup.is_none() {
                     let p = std::path::Path::new(&tp).to_path_buf();
                     let extracted = match tokio::task::spawn_blocking(move || crate::util::extract_isrc_from_path(&p)).await {
                         Ok(v) => v,
@@ -320,9 +503,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         let db_path = cfg.db_path.clone();
                         let local_path = tp.clone();
                         let code_for_cache = code.clone();
+                        let provider_name = provider.name().to_string();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = rusqlite::Connection::open(db_path)?;
-                            let _ = crate::db::upsert_track_cache(&conn, &local_path, Some(code_for_cache.as_str()), None)?;
+                            let _ = crate::db::upsert_track_cache(&conn, &provider_name, &local_path, Some(code_for_cache.as_str()), None)?;
                             Ok(())
                         })
                         .await??;
@@ -342,9 +526,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             let local_path = tp.clone();
                             let uri_clone = uri.clone();
                             let isrc_for_cache = isrc.clone();
+                            let provider_name = provider.name().to_string();
                             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                                 let conn = rusqlite::Connection::open(db_path)?;
-                                let _ = crate::db::upsert_track_cache(&conn, &local_path, Some(isrc_for_cache.as_str()), Some(&uri_clone))?;
+                                let _ = crate::db::upsert_track_cache(&conn, &provider_name, &local_path, Some(isrc_for_cache.as_str()), Some(&uri_clone))?;
                                 Ok(())
                             })
                             .await??;
@@ -361,15 +546,56 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     }
                 }
 
-                // Fallback: derive artist/title from filename and do provider metadata search
-                let fname = std::path::Path::new(&tp).file_name().and_then(|s| s.to_str()).unwrap_or("");
-                let (artist, title) = if let Some((a,t)) = fname.split_once(" - ") {
-                    (a.trim(), t.trim().trim_end_matches(".mp3"))
+                // Fallback: derive artist/title from filename and do provider metadata search.
+                // Strip any extension and try both "Artist - Title" and "Title - Artist" orders.
+                let fname = std::path::Path::new(&tp)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let stem = if let Some((base, _ext)) = fname.rsplit_once('.') {
+                    base
                 } else {
-                    ("", fname)
+                    fname
                 };
-                match provider.search_track_uri(title, artist).await {
-                    Ok(Some(uri)) => {
+
+                let mut candidates: Vec<(&str, &str)> = Vec::new();
+                if let Some((left, right)) = stem.split_once(" - ") {
+                    let left = left.trim();
+                    let right = right.trim();
+                    // First assume "Artist - Title"
+                    candidates.push((left, right));
+                    // Then try "Title - Artist" if the first fails
+                    candidates.push((right, left));
+                } else {
+                    candidates.push(("", stem));
+                }
+
+                let mut resolved_uri: Option<String> = None;
+                for (artist, raw_title) in candidates.into_iter() {
+                    // Normalize common duplicate suffixes like " copy 5"
+                    let mut title = raw_title.trim();
+                    let lower = title.to_ascii_lowercase();
+                    if let Some(idx) = lower.rfind(" copy ") {
+                        // Ensure suffix is exactly " copy <digits>"
+                        let suffix = &lower[idx + 6..];
+                        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                            title = title[..idx].trim_end();
+                        }
+                    }
+
+                    if let Ok(result) = provider.search_track_uri(title, artist).await {
+                        if let Some(uri) = result {
+                            resolved_uri = Some(uri);
+                            break;
+                        } else {
+                            // try next candidate ordering
+                        }
+                    } else if let Err(e) = provider.search_track_uri(title, artist).await {
+                        log::warn!("Error searching track {} with artist='{}' title='{}': {}", tp, artist, title, e);
+                    }
+                }
+
+                if let Some(uri) = resolved_uri {
                         match act {
                             EventAction::Add => add_uris.push(uri.clone()),
                             EventAction::Remove => remove_uris.push(uri.clone()),
@@ -381,26 +607,32 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         let uri_clone = uri.clone();
                         let provider_clone = provider.clone();
                         let maybe_isrc = provider_clone.lookup_track_isrc(&uri_clone).await.unwrap_or(None);
+                        let provider_name = provider.name().to_string();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = rusqlite::Connection::open(db_path)?;
-                            let _ = crate::db::upsert_track_cache(&conn, &local_path, maybe_isrc.as_deref(), Some(&uri_clone))?;
+                            let _ = crate::db::upsert_track_cache(&conn, &provider_name, &local_path, maybe_isrc.as_deref(), Some(&uri_clone))?;
                             Ok(())
                         })
                         .await??;
-                    }
-                    #[allow(non_snake_case)]
-                    Ok(None) => {
-                        log::warn!("Could not resolve track {} to remote URI", tp);
-                    }
-                    Err(e) => {
-                        log::warn!("Error searching track {}: {}", tp, e);
-                    }
+                } else {
+                    log::warn!("Could not resolve track {} to remote URI", tp);
                 }
             }
         }
 
-        // Helper to apply batches with retry/backoff and 429 handling
-        async fn apply_in_batches(provider: Arc<dyn Provider>, playlist_id: &str, uris: Vec<String>, is_add: bool, cfg: &Config) -> Result<()> {
+        // Helper to apply batches with retry/backoff and 429 handling.
+        // If the remote playlist is reported as missing (e.g. deleted on the
+        // provider side), we will recreate it and update the playlist_map,
+        // then retry the batch once with the new playlist id.
+        async fn apply_in_batches(
+            provider: Arc<dyn Provider>,
+            playlist_id: &mut String,
+            playlist_name: &str,
+            remote_display_name: &str,
+            uris: Vec<String>,
+            is_add: bool,
+            cfg: &Config,
+        ) -> Result<()> {
             if uris.is_empty() {
                 return Ok(());
             }
@@ -450,6 +682,56 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     }
                                     continue;
                                 } else {
+                                    // Special handling: if the provider reports that the
+                                    // playlist id no longer exists, recreate it and retry
+                                    // this batch once with the new id.
+                                    if s.contains("tidal add tracks failed: 404 Not Found") && s.contains("Playlists with id") {
+                                        log::warn!(
+                                            "Remote playlist {} (id {}) not found on provider {}; recreating...",
+                                            playlist_name,
+                                            playlist_id,
+                                            provider.name()
+                                        );
+
+                                        // Recreate the playlist via ensure_playlist using the
+                                        // current display name, then update playlist_map.
+                                        match provider.ensure_playlist(remote_display_name, "").await {
+                                            Ok(new_id) => {
+                                                let db_path = cfg.db_path.clone();
+                                                let pl = playlist_name.to_string();
+                                                let prov = provider.name().to_string();
+                                                let new_id_clone = new_id.clone();
+                                                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                                                    let conn = rusqlite::Connection::open(db_path)?;
+                                                    crate::db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
+                                                    Ok(())
+                                                })
+                                                .await??;
+
+                                                *playlist_id = new_id;
+                                                log::info!(
+                                                    "Recreated remote playlist {} with new id {} for provider {}",
+                                                    playlist_name,
+                                                    playlist_id,
+                                                    provider.name()
+                                                );
+
+                                                // Reset attempts and retry the current chunk with
+                                                // the fresh playlist id.
+                                                attempt = 0;
+                                                continue;
+                                            }
+                                            Err(err) => {
+                                                log::error!(
+                                                    "Failed to recreate missing playlist {} for provider {}: {}",
+                                                    playlist_name,
+                                                    provider.name(),
+                                                    err
+                                                );
+                                                return Err(err);
+                                            }
+                                        }
+                                    }
                                     if attempt >= cfg.max_retries_on_error {
                                         log::error!("Giving up after {} attempts: {}", attempt, e);
                                         break;
@@ -468,10 +750,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         }
 
         let provider_arc = provider.clone();
-        if let Err(e) = apply_in_batches(provider_arc.clone(), &remote_id, remove_uris, false, cfg).await {
+        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, remove_uris, false, cfg).await {
                 log::error!("Error applying removes for {}: {}", playlist_name, e);
         }
-        if let Err(e) = apply_in_batches(provider_arc.clone(), &remote_id, add_uris, true, cfg).await {
+        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, add_uris, true, cfg).await {
                 log::error!("Error applying adds for {}: {}", playlist_name, e);
         }
 
@@ -510,10 +792,22 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
     )?;
     // collect thread handles for the enqueue operations so we can join before returning
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    for (folder, _node) in tree.nodes.iter() {
+        for (folder, _node) in tree.nodes.iter() {
         let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).display().to_string();
-        let playlist_name = crate::util::expand_template(&cfg.local_playlist_template, folder_name, &rel);
+        let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).to_path_buf();
+
+        let path_to_parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+        let path_to_parent_str = if path_to_parent.as_os_str().is_empty() {
+            String::new()
+        } else {
+            let mut s = path_to_parent.display().to_string();
+            if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                s.push(std::path::MAIN_SEPARATOR);
+            }
+            s
+        };
+
+        let playlist_name = crate::util::expand_template(&cfg.local_playlist_template, folder_name, &path_to_parent_str);
         let playlist_path = folder.join(&playlist_name);
 
         if cfg.playlist_mode == "flat" {
@@ -527,7 +821,7 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         }
 
         // enqueue Create event in a background thread but keep the handle to join
-        let pname = playlist_name.clone();
+        let pname = rel.display().to_string();
         let db_path = cfg.db_path.clone();
         let h = std::thread::spawn(move || {
             if let Ok(conn) = crate::db::open_or_create(std::path::Path::new(&db_path)) {

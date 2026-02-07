@@ -1,7 +1,9 @@
 root_folder = "/music"
 whitelist = "" # colon-separated list of regex patterns applied to full folder paths; empty -> all under root
 local_playlist_template = "${folder_name}.m3u"
-remote_playlist_template = "${relative_path}"
+remote_playlist_template = "${relative_path}" # legacy/default template applied when structure-specific templates are empty
+remote_playlist_template_flat = "${relative_path}"     # used when online_playlist_structure = "flat" (and/or provider has no folders)
+remote_playlist_template_folders = "${relative_path}"  # used when online_playlist_structure = "folders" on providers that support folders
 playlist_description_template = ""
 playlist_order_mode = "append" # "append" or "sync_order"
 playlist_mode = "flat" # "flat" or "linked"
@@ -27,3 +29,76 @@ max_batch_size_spotify = 100
 
 # DB path (default)
 db_path = "/var/lib/music-sync/music-sync.db"
+
+# Online playlist output options
+
+# When set, all new online playlists are logically nested under this
+# root playlist name. The actual representation depends on the
+# provider and `online_playlist_structure`.
+# Example: "My Library".
+online_root_playlist = ""
+
+# Structure for online playlist naming:
+# - "flat": remote playlists are a single-level list. If
+#   `online_folder_flattening_delimiter` is non-empty and
+#   `online_root_playlist` is set, names become
+#   "<online_root_playlist><delimiter><local_playlist_name>".
+# - "folders": for providers that support folder nesting, the root
+#   is treated as a parent folder. For providers that do not support
+#   nesting (e.g. Tidal), the implementation falls back to flat naming
+#   using `online_folder_flattening_delimiter` when set.
+online_playlist_structure = "flat" # "flat" or "folders"
+
+# Delimiter used when flattening folders into a single playlist name in
+# flat mode or when a provider does not support folders. If empty but
+# `online_root_playlist` is set, a default of " - " is used so that all
+# synced playlists remain clearly grouped under the root.
+# Example values: " - " or " / ".
+online_folder_flattening_delimiter = ""
+
+# Template placeholders (shared)
+#
+# All template fields in this config use the same placeholder syntax and
+# expansion function and are always expanded with two values:
+#   "${folder_name}"    ->
+#       - For local playlists: the folder name at the playlist root
+#         (e.g. "Album1"), plus whatever suffix you include in the
+#         template (e.g. "${folder_name}.m3u" -> "Album1.m3u").
+#       - For remote playlists: the final path segment of the logical
+#         playlist key (e.g. "Album1").
+#   "${path_to_parent}" ->
+#       - For local playlists: the path from `root_folder` to the
+#         playlist folder's parent, with a trailing separator when
+#         non-empty (e.g. "Artist/" for "/music/Artist/Album1").
+#       - For remote playlists: the logical parent path starting at
+#         `online_root_playlist` when set. In flat mode, if
+#         `online_folder_flattening_delimiter` is non-empty, filesystem
+#         separators in this path are replaced with that delimiter.
+#   "${relative_path}"  -> legacy alias expanded as
+#         `path_to_parent + folder_name` so existing configs keep
+#         working. For remote playlists this typically yields the full
+#         logical path to the playlist folder under the root.
+#
+# Example (combined with online_folder_flattening_delimiter):
+#   root_folder = "/music"
+#   playlist folder = "/music/Artist/Album1"
+#   local_playlist_template = "${folder_name}.m3u"
+#   remote_playlist_template_flat = "${relative_path}"
+#   online_root_playlist = "Syncd"
+#   online_playlist_structure = "flat"
+#   online_folder_flattening_delimiter = "| "
+#
+#   Then:
+#     ${folder_name}     -> "Album1" (local/remote logical folder name)
+#     ${path_to_parent}  -> "Artist/" (local)
+#                           "Syncd/Artist/" (remote filesystem-style)
+#                           "Syncd| Artist| " (remote flat display)
+#     ${relative_path}   -> "Artist/Album1" (local)
+#                           "Syncd| Artist| Album1" (remote; alias for
+#                              `path_to_parent + folder_name`)
+#
+# Fields that use these templates:
+#   - local_playlist_template
+#   - remote_playlist_template
+#   - remote_playlist_template_flat
+#   - remote_playlist_template_folders

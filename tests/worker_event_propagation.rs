@@ -1,6 +1,4 @@
-use music_file_playlist_online_sync::api::{Provider, mock::MockProvider};
-use music_file_playlist_online_sync::worker::run_worker_once;
-use music_file_playlist_online_sync::config::Config;
+use music_file_playlist_online_sync::api::Provider;
 use std::sync::Arc;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -21,6 +19,9 @@ impl Provider for TestProvider {
     async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
     async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
     async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> { Ok(None) }
+    async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> { Ok(None) }
+    async fn lookup_track_isrc(&self, _uri: &str) -> anyhow::Result<Option<String>> { Ok(None) }
+    async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
     fn name(&self) -> &str { self.name }
     fn is_authenticated(&self) -> bool { true }
 }

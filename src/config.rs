@@ -10,6 +10,26 @@ pub struct Config {
     pub local_playlist_template: String,
     #[serde(default = "default_remote_template")]
     pub remote_playlist_template: String,
+    /// Optional remote playlist templates for different online structures.
+    /// When non-empty, these override `remote_playlist_template` for the
+    /// corresponding structure ("flat" or "folders").
+    ///
+    /// The templates support the same placeholders as `local_playlist_template`:
+    /// - "${folder_name}"     -> logical playlist folder name (final path
+    ///                            segment, e.g. "Album1").
+    /// - "${path_to_parent}"  -> logical path to the playlist folder's
+    ///                            parent. For remote playlists this includes
+    ///                            `online_root_playlist` when set. In flat
+    ///                            mode, when `online_folder_flattening_delimiter`
+    ///                            is non-empty, filesystem separators in this
+    ///                            path are replaced with that delimiter.
+    /// - "${relative_path}"   -> legacy alias expanded as
+    ///                            `path_to_parent + folder_name` so existing
+    ///                            configs keep working.
+    #[serde(default)]
+    pub remote_playlist_template_flat: String,
+    #[serde(default)]
+    pub remote_playlist_template_folders: String,
     #[serde(default)]
     pub playlist_description_template: String,
     #[serde(default = "default_playlist_order_mode")]
@@ -49,6 +69,31 @@ pub struct Config {
     /// Examples: ["*.mp3", "*.flac", "wav"]. Case-insensitive.
     #[serde(default = "default_file_extensions")]
     pub file_extensions: Vec<String>,
+
+    /// Optional logical root playlist name for online providers.
+    /// When set, all remote playlists will be nested under this logical root
+    /// according to `online_playlist_structure`.
+    #[serde(default)]
+    pub online_root_playlist: String,
+
+    /// Structure for online playlist naming: "flat" or "folders".
+    /// - "flat": playlists are a single-level list; when
+    ///   `online_folder_flattening_delimiter` is set and `online_root_playlist`
+    ///   is non-empty, remote playlist names become
+    ///   "<online_root_playlist><delim><local_name>".
+    /// - "folders": providers that support folders may represent nested
+    ///   structure; for providers that do not (e.g. Tidal), the implementation
+    ///   will automatically fall back to a flattened naming scheme.
+    #[serde(default = "default_online_playlist_structure")]
+    pub online_playlist_structure: String,
+
+    /// Delimiter used when flattening folder structure into a single playlist
+    /// name for online providers in "flat" mode or when a provider does not
+    /// support folder nesting. If empty and `online_root_playlist` is set, a
+    /// sensible default (" - ") is used so that all synced playlists remain
+    /// clearly namespaced under the root.
+    #[serde(default)]
+    pub online_folder_flattening_delimiter: String,
 }
 
 fn default_local_template() -> String { "${folder_name}.m3u".into() }
@@ -64,6 +109,8 @@ fn default_nightly_cron() -> String { "0 3 * * *".into() }
 fn default_max_retries() -> u32 { 3 }
 fn default_max_batch_spotify() -> usize { 100 }
 fn default_db_path() -> PathBuf { "/var/lib/music-sync/music-sync.db".into() }
+
+fn default_online_playlist_structure() -> String { "flat".into() }
 
 fn default_file_extensions() -> Vec<String> {
     vec![

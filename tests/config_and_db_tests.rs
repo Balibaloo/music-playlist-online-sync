@@ -1,7 +1,6 @@
 use tempfile::tempdir;
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
 
 use music_file_playlist_online_sync::config::Config;
 use music_file_playlist_online_sync::db;

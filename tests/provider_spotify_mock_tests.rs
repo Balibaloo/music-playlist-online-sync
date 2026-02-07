@@ -17,7 +17,7 @@ fn spotify_token_refresh_and_playlist_flow() {
     env::set_var("SPOTIFY_API_BASE", &mock_url);
 
     // Run the async test body on a fresh runtime
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
 
     // Mock token refresh endpoint (accounts.../api/token)
@@ -68,7 +68,7 @@ fn spotify_token_refresh_and_playlist_flow() {
         "refresh_token": "refresh_token_value",
         "scope": "playlist-modify-private"
     }).to_string();
-    db::save_credential_raw(&conn, "spotify", &stored).unwrap();
+    db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
     // Instantiate provider with dummy client id/secret and point to the temp db
     let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());

@@ -38,7 +38,10 @@ systemctl start music-file-playlist-online-sync-worker.service
 
 Configuration
 
-Edit `/etc/music-sync/config.toml` to set `root_folder`, `db_path`, and credentials. See `config/example-config.toml` for options.
+Edit `/etc/music-sync/config.toml` to set `root_folder`, `db_path`, and credentials. See `config/example-config.toml` for all options, including:
+- `local_playlist_template` for on-disk `.m3u` filenames
+- `online_root_playlist`, `online_playlist_structure`, and `online_folder_flattening_delimiter` for how online playlists are grouped
+- `remote_playlist_template_flat` / `remote_playlist_template_folders` (and the legacy `remote_playlist_template`) for customizing remote playlist display names, supporting `${folder_name}`, `${path_to_parent}`, and the legacy `${relative_path}` alias (expanded as `path_to_parent + folder_name`).
 
 Security
 

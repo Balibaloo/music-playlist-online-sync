@@ -1,8 +1,8 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_log::LogTracer;
+use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::prelude::*;
 use tracing_appender::rolling::RollingFileAppender;
 use anyhow::Result;
 use music_file_playlist_online_sync as lib;
@@ -46,8 +46,8 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AuthCommands {
-    /// Authorize Spotify and store tokens in DB. Requires client_id & client_secret.
-    Spotify(SpotifyAuthArgs),
+    /// Authorize Spotify and store tokens in DB (interactive)
+    Spotify,
     /// Authorize Tidal and store tokens in DB (interactive)
     Tidal,
 }
@@ -60,39 +60,27 @@ enum AuthTestCommands {
     Tidal,
 }
 
-#[derive(Args)]
-struct SpotifyAuthArgs {
-    #[arg(long)]
-    client_id: String,
-    #[arg(long)]
-    client_secret: String,
-    /// Redirect URI you registered with Spotify (for manual flow, set to something like http://localhost/)
-    #[arg(long, default_value = "http://localhost/")]
-    redirect_uri: String,
-}
-
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::from_path(&cli.config)?;
 
-    // Initialize structured logging to a daily rolling file in the configured log dir.
-    // Keep the _guard alive for the duration of the process so the non-blocking writer flushes on drop.
-        // Initialize log->tracing bridge and structured logging to a daily rolling file in the configured log dir.
-        // Keep the _guard alive for the duration of the process so the non-blocking writer flushes on drop.
-        use tracing_subscriber::fmt::writer::MakeWriterExt;
-        let file_appender: RollingFileAppender = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
-        let writer = non_blocking.and(stdout);
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .with_writer(writer)
-            .finish()
-            .try_init()
-            .expect("Failed to set tracing subscriber");
-        LogTracer::init().ok();
+    // Initialize log->tracing bridge and structured logging.
+    // Logs go to both stdout and a daily-rotated file in cfg.log_dir.
+    let file_appender: RollingFileAppender = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Honor RUST_LOG if set, otherwise default to info.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let file_layer = fmt::layer().with_writer(non_blocking);
+    let stdout_layer = fmt::layer().with_writer(std::io::stdout);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stdout_layer)
+        .init();
 
     match cli.command {
         Commands::Watcher => {
@@ -111,16 +99,17 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Auth { sub } => match sub {
-            AuthCommands::Spotify(args) => {
-                lib::api::spotify_auth::run_spotify_auth(&args.client_id, &args.client_secret, &args.redirect_uri, &cfg).await?;
+            AuthCommands::Spotify => {
+                lib::api::spotify_auth::run_spotify_auth(&cfg).await?;
             }
             AuthCommands::Tidal => {
                 lib::api::tidal_auth::run_tidal_auth(&cfg).await?;
             }
         },
         Commands::AuthTest { sub } => {
-            use std::sync::Arc;
             use futures::future::BoxFuture;
+            use std::sync::Arc;
+
             async fn run_auth_test(
                 provider_name: &str,
                 list_playlists: BoxFuture<'static, anyhow::Result<Vec<(String, String)>>>,
@@ -132,6 +121,7 @@ async fn main() -> Result<()> {
                 for (id, name) in &playlists {
                     println!("- {}: {}", id, name);
                 }
+
                 let test_prefix = "Test MFPOS ";
                 let config_path = std::env::var("TEST_DB_PATH").ok().unwrap_or_else(|| "etc/music-sync/config.toml".to_string());
                 let db_path = if config_path.ends_with(".toml") {
@@ -164,7 +154,7 @@ async fn main() -> Result<()> {
                         let mut best_id = String::new();
                         for n in 1..=max_num.max(1) {
                             let name = format!("{}{}", test_prefix, n);
-                            if let Ok(Some(id)) = music_file_playlist_online_sync::db::get_remote_playlist_id(&conn, &name) {
+                            if let Ok(Some(id)) = music_file_playlist_online_sync::db::get_remote_playlist_id(&conn, provider_name, &name) {
                                 if n > highest_n {
                                     highest_n = n;
                                     best_name = name;
@@ -185,13 +175,20 @@ async fn main() -> Result<()> {
                     let new_num = mapped_num + 1;
                     let new_name = format!("{}{}", test_prefix, new_num);
                     println!("Renaming playlist '{}' to '{}'", mapped_name, new_name);
-                    rename_playlist(mapped_id.clone(), new_name.clone()).await?;
-                    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                        let _ = music_file_playlist_online_sync::db::upsert_playlist_map(&conn, &new_name, &mapped_id);
-                        println!("[DEBUG] Mapping updated in DB.");
+                    match rename_playlist(mapped_id.clone(), new_name.clone()).await {
+                        Ok(()) => {
+                            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                                let _ = music_file_playlist_online_sync::db::upsert_playlist_map(&conn, provider_name, &new_name, &mapped_id);
+                                println!("[DEBUG] Mapping updated in DB.");
+                            }
+                            println!("{} auth test complete.", provider_name);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            eprintln!("[WARN] Failed to rename existing {} test playlist (it may have been deleted): {}", provider_name, e);
+                            // Fall through to creating a fresh test playlist and mapping
+                        }
                     }
-                    println!("{} auth test complete.", provider_name);
-                    return Ok(());
                 }
 
                 // If no mapping, create Test MFPOS 1
@@ -201,7 +198,7 @@ async fn main() -> Result<()> {
                 let pid = ensure_playlist(test_name.clone(), desc).await?;
                 println!("Created playlist with id: {}", pid);
                 if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                    let _ = music_file_playlist_online_sync::db::upsert_playlist_map(&conn, &test_name, &pid);
+                    let _ = music_file_playlist_online_sync::db::upsert_playlist_map(&conn, provider_name, &test_name, &pid);
                     println!("[DEBUG] Mapping created in DB.");
                 }
                 println!("{} auth test complete.", provider_name);
@@ -237,8 +234,33 @@ async fn main() -> Result<()> {
                 AuthTestCommands::Tidal => {
                     use lib::api::tidal::TidalProvider;
                     let db_path = cfg.db_path.clone();
-                    // Pass empty strings to load from DB
-                    let tidal = Arc::new(TidalProvider::new(String::new(), String::new(), db_path));
+                    // Pass empty strings to load from DB; propagate any configured
+                    // online_root_playlist so auth tests reflect real behavior.
+                    let tidal = Arc::new(TidalProvider::new(
+                        String::new(),
+                        String::new(),
+                        db_path,
+                        if cfg.online_root_playlist.trim().is_empty() {
+                            None
+                        } else {
+                            Some(cfg.online_root_playlist.clone())
+                        },
+                    ));
+
+                    // First, explicitly test token refresh so users can see
+                    // whether their client_id/client_secret and pasted
+                    // token JSON support refresh.
+                    println!("Testing Tidal token refresh...");
+                    match tidal.test_refresh_token().await {
+                        Ok(()) => {
+                            println!("Tidal token refresh succeeded. Proceeding with playlist tests.\n");
+                        }
+                        Err(e) => {
+                            eprintln!("Tidal token refresh FAILED: {}", e);
+                            return Err(e);
+                        }
+                    }
+
                     let list_playlists = {
                         let tidal = tidal.clone();
                         Box::pin(async move { tidal.list_user_playlists().await })
@@ -264,21 +286,27 @@ async fn main() -> Result<()> {
         Commands::QueueStatus => {
             let db_path = cfg.db_path.clone();
             match rusqlite::Connection::open(&db_path) {
-                Ok(conn) => {
-                    match music_file_playlist_online_sync::db::fetch_unsynced_events(&conn) {
-                        Ok(events) => {
-                            println!("Queue contains {} unsynced event(s):", events.len());
-                            for event in events {
-                                println!("- id: {} | playlist: {} | action: {:?} | track: {:?} | extra: {:?} | synced: {} | ts: {}",
-                                    event.id, event.playlist_name, event.action, event.track_path, event.extra, event.is_synced, event.timestamp_ms);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to fetch queue events: {}", e);
-                            std::process::exit(1);
+                Ok(conn) => match music_file_playlist_online_sync::db::fetch_unsynced_events(&conn) {
+                    Ok(events) => {
+                        println!("Queue contains {} unsynced event(s):", events.len());
+                        for event in events {
+                            println!(
+                                "- id: {} | playlist: {} | action: {:?} | track: {:?} | extra: {:?} | synced: {} | ts: {}",
+                                event.id,
+                                event.playlist_name,
+                                event.action,
+                                event.track_path,
+                                event.extra,
+                                event.is_synced,
+                                event.timestamp_ms
+                            );
                         }
                     }
-                }
+                    Err(e) => {
+                        eprintln!("Failed to fetch queue events: {}", e);
+                        std::process::exit(1);
+                    }
+                },
                 Err(e) => {
                     eprintln!("Failed to open DB: {}", e);
                     std::process::exit(1);
@@ -288,17 +316,15 @@ async fn main() -> Result<()> {
         Commands::QueueClear => {
             let db_path = cfg.db_path.clone();
             match rusqlite::Connection::open(&db_path) {
-                Ok(mut conn) => {
-                    match music_file_playlist_online_sync::db::clear_unsynced_events(&mut conn) {
-                        Ok(removed) => {
-                            println!("Cleared {} unsynced event(s) from the queue.", removed);
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to clear queue events: {}", e);
-                            std::process::exit(1);
-                        }
+                Ok(mut conn) => match music_file_playlist_online_sync::db::clear_unsynced_events(&mut conn) {
+                    Ok(removed) => {
+                        println!("Cleared {} unsynced event(s) from the queue.", removed);
                     }
-                }
+                    Err(e) => {
+                        eprintln!("Failed to clear queue events: {}", e);
+                        std::process::exit(1);
+                    }
+                },
                 Err(e) => {
                     eprintln!("Failed to open DB: {}", e);
                     std::process::exit(1);

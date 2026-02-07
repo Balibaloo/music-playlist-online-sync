@@ -3,7 +3,6 @@ use music_file_playlist_online_sync::config::Config;
 use music_file_playlist_online_sync::worker::run_worker_once;
 use tempfile::NamedTempFile;
 use music_file_playlist_online_sync::db;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_worker_no_credentials() {
@@ -15,6 +14,8 @@ async fn test_worker_no_credentials() {
         whitelist: String::new(),
         local_playlist_template: String::new(),
         remote_playlist_template: String::new(),
+        remote_playlist_template_flat: String::new(),
+        remote_playlist_template_folders: String::new(),
         playlist_description_template: String::new(),
         playlist_order_mode: String::new(),
         playlist_mode: String::new(),
@@ -27,6 +28,10 @@ async fn test_worker_no_credentials() {
         queue_length_stop_cloud_sync_threshold: None,
         max_retries_on_error: 0,
         max_batch_size_spotify: 0,
+        file_extensions: Vec::new(),
+        online_root_playlist: String::new(),
+        online_playlist_structure: "flat".into(),
+        online_folder_flattening_delimiter: String::new(),
     };
     // Run migrations to set up schema in the temp DB
     let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
@@ -48,6 +53,8 @@ async fn test_worker_with_mock_and_real_providers() {
         whitelist: String::new(),
         local_playlist_template: String::new(),
         remote_playlist_template: String::new(),
+        remote_playlist_template_flat: String::new(),
+        remote_playlist_template_folders: String::new(),
         playlist_description_template: String::new(),
         playlist_order_mode: String::new(),
         playlist_mode: String::new(),
@@ -60,6 +67,10 @@ async fn test_worker_with_mock_and_real_providers() {
         queue_length_stop_cloud_sync_threshold: None,
         max_retries_on_error: 0,
         max_batch_size_spotify: 0,
+        file_extensions: Vec::new(),
+        online_root_playlist: String::new(),
+        online_playlist_structure: "flat".into(),
+        online_folder_flattening_delimiter: String::new(),
     };
     // Run migrations to set up schema in the temp DB
     let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();

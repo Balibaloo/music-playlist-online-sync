@@ -42,10 +42,10 @@ fn spotify_refresh_failure_returns_error() {
         "refresh_token": "refresh",
         "scope": ""
     }).to_string();
-    db::save_credential_raw(&conn, "spotify", &stored).unwrap();
+    db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
     let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move {
         provider.ensure_playlist("X", "").await
     });

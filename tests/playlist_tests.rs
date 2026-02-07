@@ -1,6 +1,6 @@
 use tempfile::tempdir;
 use std::fs::{self, File};
-use std::io::{Write, Read};
+use std::io::Read;
 use std::thread::sleep;
 use std::time::Duration;
 

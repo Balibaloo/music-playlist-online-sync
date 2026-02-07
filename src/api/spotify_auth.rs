@@ -24,7 +24,37 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
-pub async fn run_spotify_auth(client_id: &str, client_secret: &str, redirect_uri: &str, cfg: &Config) -> Result<()> {
+pub async fn run_spotify_auth(cfg: &Config) -> Result<()> {
+    use std::io;
+
+    println!("Enter your Spotify client_id:");
+    let mut client_id = String::new();
+    io::stdin().read_line(&mut client_id)?;
+    let client_id = client_id.trim().to_string();
+    if client_id.is_empty() {
+        return Err(anyhow!("no client_id provided"));
+    }
+
+    println!("Enter your Spotify client_secret:");
+    let mut client_secret = String::new();
+    io::stdin().read_line(&mut client_secret)?;
+    let client_secret = client_secret.trim().to_string();
+    if client_secret.is_empty() {
+        return Err(anyhow!("no client_secret provided"));
+    }
+
+    println!("Enter your Spotify redirect URI (leave blank for http://127.0.0.1:8888/):");
+    let mut redirect_uri = String::new();
+    io::stdin().read_line(&mut redirect_uri)?;
+    let redirect_uri = {
+        let trimmed = redirect_uri.trim();
+        if trimmed.is_empty() {
+            "http://127.0.0.1:8888/".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+
     // Build the auth URL
     let scopes = vec![
         "playlist-modify-private",
@@ -36,9 +66,9 @@ pub async fn run_spotify_auth(client_id: &str, client_secret: &str, redirect_uri
     let mut url = Url::parse("https://accounts.spotify.com/authorize")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
-        .append_pair("client_id", client_id)
+        .append_pair("client_id", &client_id)
         .append_pair("scope", &scopes.join(" "))
-        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("redirect_uri", &redirect_uri)
         .append_pair("show_dialog", "true");
 
     println!("Open this URL in your browser and authorize the application:\n\n{}\n", url);
@@ -55,7 +85,7 @@ pub async fn run_spotify_auth(client_id: &str, client_secret: &str, redirect_uri
     let params = [
         ("grant_type", "authorization_code"),
         ("code", &code),
-        ("redirect_uri", redirect_uri),
+        ("redirect_uri", &redirect_uri),
     ];
     let auth_header = format!("Basic {}", general_purpose::STANDARD.encode(format!("{}:{}", client_id, client_secret)));
     let resp = client

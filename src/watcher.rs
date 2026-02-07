@@ -42,13 +42,15 @@ pub struct InMemoryTree {
 /// Return true if the given path's extension matches any of the configured
 /// file_extensions patterns ("*.mp3", "mp3", ".mp3"), case-insensitive.
 fn path_matches_extensions(path: &Path, exts: &[String]) -> bool {
-    let ext_os = match path.extension() {
-        Some(e) => e,
-        None => return false,
+    let ext_os = if let Some(e) = path.extension() {
+        e
+    } else {
+        return false;
     };
-    let ext = match ext_os.to_str() {
-        Some(s) => s.to_ascii_lowercase(),
-        None => return false,
+    let ext = if let Some(s) = ext_os.to_str() {
+        s.to_ascii_lowercase()
+    } else {
+        return false;
     };
     for pat in exts {
         let mut p = pat.trim();
@@ -110,9 +112,10 @@ impl InMemoryTree {
                 nodes.entry(path.clone()).or_insert_with(|| FolderNode::new(path));
             } else if entry.file_type().is_file() {
                 // If a file_extensions whitelist is provided, only include matching media files.
-                let allowed = match file_extensions {
-                    Some(exts) => path_matches_extensions(&path, exts),
-                    None => true,
+                let allowed = if let Some(exts) = file_extensions {
+                    path_matches_extensions(&path, exts)
+                } else {
+                    true
                 };
                 if allowed {
                     if let Some(parent) = entry.path().parent() {
@@ -286,8 +289,23 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     // Initial playlist writes (flat mode)
     for (folder, _node) in tree.nodes.iter() {
         let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).display().to_string();
-        let playlist_name = util::expand_template(&cfg.local_playlist_template, folder_name, &rel);
+        let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).to_path_buf();
+
+        // Local template uses folder_name and path_to_parent; the logical
+        // playlist key used in the DB is the folder path relative to root
+        // (rel.display()).
+        let path_to_parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+        let path_to_parent_str = if path_to_parent.as_os_str().is_empty() {
+            String::new()
+        } else {
+            let mut s = path_to_parent.display().to_string();
+            if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                s.push(std::path::MAIN_SEPARATOR);
+            }
+            s
+        };
+
+        let playlist_name = util::expand_template(&cfg.local_playlist_template, folder_name, &path_to_parent_str);
         let playlist_path = folder.join(playlist_name);
         if cfg.playlist_mode == "flat" {
             if let Err(e) = playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode, &cfg.file_extensions) {
@@ -335,8 +353,20 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                 for folder in due {
                     // Write local playlist and enqueue a generic create/update event for playlist (watcher enqueues per-file ops too)
                     let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(&folder).display().to_string();
-                    let playlist_name = util::expand_template(&cfg.local_playlist_template, folder_name, &rel);
+                    let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(&folder).to_path_buf();
+
+                    let path_to_parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+                    let path_to_parent_str = if path_to_parent.as_os_str().is_empty() {
+                        String::new()
+                    } else {
+                        let mut s = path_to_parent.display().to_string();
+                        if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                            s.push(std::path::MAIN_SEPARATOR);
+                        }
+                        s
+                    };
+
+                    let playlist_name = util::expand_template(&cfg.local_playlist_template, folder_name, &path_to_parent_str);
                     let playlist_path = folder.join(&playlist_name);
 
                     // choose playlist mode
@@ -352,7 +382,9 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
 
                     // enqueue a generic Create event for the playlist into DB
                     // Run DB mutations in a short-lived blocking thread so we don't block the worker loop
-                    let playlist_name2 = playlist_name.clone();
+                    // Use the folder path relative to root as the logical
+                    // playlist key for the event queue.
+                    let playlist_name2 = rel.display().to_string();
                     let db_path2 = db_path.clone();
                     thread::spawn(move || {
                         if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
@@ -459,55 +491,96 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                         match op {
                                             LogicalOp::Add { playlist_folder, track_path } => {
                                                 info!("LogicalOp::Add playlist_folder={:?}, track_path={:?}", playlist_folder, track_path);
-                                                // set debounce for folder
-                                                if let Ok(mut dm) = debounce_map_cb.lock() {
-                                                    dm.insert(playlist_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
-                                                    // also propagate debounce to ancestor folders so linked playlists rebuild
-                                                    if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
-                                                        while p.starts_with(&cfg_cb.root_folder) {
-                                                            if t.nodes.contains_key(&p) {
-                                                                dm.insert(p.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
-                                                            }
-                                                            if p == cfg_cb.root_folder { break; }
-                                                            if let Some(np) = p.parent().map(|x| x.to_path_buf()) { p = np; } else { break; }
+
+                                                // Build the list of playlist folders that should reflect this
+                                                // track change: the immediate folder plus any ancestor folders
+                                                // that are represented as playlist nodes (so parent playlists
+                                                // stay in sync online as well).
+                                                let mut target_folders: Vec<std::path::PathBuf> = Vec::new();
+                                                target_folders.push(playlist_folder.clone());
+                                                if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
+                                                    while p.starts_with(&cfg_cb.root_folder) {
+                                                        if t.nodes.contains_key(&p) {
+                                                            target_folders.push(p.clone());
                                                         }
+                                                        if p == cfg_cb.root_folder { break; }
+                                                        if let Some(np) = p.parent().map(|x| x.to_path_buf()) { p = np; } else { break; }
                                                     }
                                                 }
-                                                // enqueue add event
-                                                let playlist_name = util::expand_template(&cfg_cb.local_playlist_template, playlist_folder.file_name().and_then(|s| s.to_str()).unwrap_or(""), &playlist_folder.strip_prefix(&cfg_cb.root_folder).unwrap_or(&playlist_folder).display().to_string());
+
+                                                // Debounce playlist rewrite for all affected folders
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
+                                                    for folder in &target_folders {
+                                                        dm.insert(folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
+                                                    }
+                                                }
+
+                                                // Enqueue add events for the immediate folder and all parent
+                                                // playlists so that remote parent playlists receive the track
+                                                // updates as well.
                                                 let db_path2 = db_path.clone();
-                                                let pname = playlist_name.clone();
+                                                let root_folder = cfg_cb.root_folder.clone();
                                                 let track = track_path.to_string_lossy().to_string();
+                                                let playlist_names: Vec<String> = target_folders
+                                                    .iter()
+                                                    .map(|folder| {
+                                                        folder
+                                                            .strip_prefix(&root_folder)
+                                                            .unwrap_or(folder)
+                                                            .display()
+                                                            .to_string()
+                                                    })
+                                                    .collect();
                                                 thread::spawn(move || {
                                                     if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
-                                                        if let Err(e) = db::enqueue_event(&conn, &pname, &EventAction::Add, Some(&track), None) {
-                                                            warn!("Failed to enqueue add event: {}", e);
+                                                        for pname in playlist_names {
+                                                            if let Err(e) = db::enqueue_event(&conn, &pname, &EventAction::Add, Some(&track), None) {
+                                                                warn!("Failed to enqueue add event for {}: {}", pname, e);
+                                                            }
                                                         }
                                                     }
                                                 });
                                             }
                                             LogicalOp::Remove { playlist_folder, track_path } => {
                                                 info!("LogicalOp::Remove playlist_folder={:?}, track_path={:?}", playlist_folder, track_path);
-                                                if let Ok(mut dm) = debounce_map_cb.lock() {
-                                                    dm.insert(playlist_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
-                                                    if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
-                                                        while p.starts_with(&cfg_cb.root_folder) {
-                                                            if t.nodes.contains_key(&p) {
-                                                                dm.insert(p.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
-                                                            }
-                                                            if p == cfg_cb.root_folder { break; }
-                                                            if let Some(np) = p.parent().map(|x| x.to_path_buf()) { p = np; } else { break; }
+
+                                                let mut target_folders: Vec<std::path::PathBuf> = Vec::new();
+                                                target_folders.push(playlist_folder.clone());
+                                                if let Some(mut p) = playlist_folder.parent().map(|x| x.to_path_buf()) {
+                                                    while p.starts_with(&cfg_cb.root_folder) {
+                                                        if t.nodes.contains_key(&p) {
+                                                            target_folders.push(p.clone());
                                                         }
+                                                        if p == cfg_cb.root_folder { break; }
+                                                        if let Some(np) = p.parent().map(|x| x.to_path_buf()) { p = np; } else { break; }
                                                     }
                                                 }
-                                                let playlist_name = util::expand_template(&cfg_cb.local_playlist_template, playlist_folder.file_name().and_then(|s| s.to_str()).unwrap_or(""), &playlist_folder.strip_prefix(&cfg_cb.root_folder).unwrap_or(&playlist_folder).display().to_string());
+
+                                                if let Ok(mut dm) = debounce_map_cb.lock() {
+                                                    for folder in &target_folders {
+                                                        dm.insert(folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));
+                                                    }
+                                                }
+
                                                 let db_path2 = db_path.clone();
-                                                let pname = playlist_name.clone();
+                                                let root_folder = cfg_cb.root_folder.clone();
                                                 let track = track_path.to_string_lossy().to_string();
+                                                let playlist_names: Vec<String> = target_folders
+                                                    .iter()
+                                                    .map(|folder| {
+                                                        folder
+                                                            .strip_prefix(&root_folder)
+                                                            .unwrap_or(folder)
+                                                            .display()
+                                                            .to_string()
+                                                    })
+                                                    .collect();
                                                 thread::spawn(move || {
                                                     if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
-                                                        if let Err(e) = db::enqueue_event(&conn, &pname, &EventAction::Remove, Some(&track), None) {
-                                                            warn!("Failed to enqueue remove event: {}", e);
+                                                        for pname in playlist_names {
+                                                            if let Err(e) = db::enqueue_event(&conn, &pname, &EventAction::Remove, Some(&track), None) {
+                                                                warn!("Failed to enqueue remove event for {}: {}", pname, e);
+                                                            }
                                                         }
                                                     }
                                                 });
@@ -545,16 +618,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
 
                                                 // Enqueue a Delete event so the worker can eventually delete
                                                 // the corresponding remote playlist.
-                                                let folder_name = playlist_folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                                                let rel = playlist_folder
+                                                let db_path2 = db_path.clone();
+                                                let pname = playlist_folder
                                                     .strip_prefix(&cfg_cb.root_folder)
                                                     .unwrap_or(&playlist_folder)
                                                     .display()
                                                     .to_string();
-                                                let playlist_name = util::expand_template(&cfg_cb.local_playlist_template, folder_name, &rel);
-
-                                                let db_path2 = db_path.clone();
-                                                let pname = playlist_name.clone();
                                                 thread::spawn(move || {
                                                     if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
                                                         if let Err(e) = db::enqueue_event(&conn, &pname, &EventAction::Delete, None, None) {
@@ -590,13 +659,19 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
 
                                                 // enqueue a rename event (playlist rename) into DB: use old playlist name as key
-                                                let folder_name_from = from_folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                                                let rel_from = from_folder.strip_prefix(&cfg_cb.root_folder).unwrap_or(&from_folder).display().to_string();
-                                                let playlist_name_from = util::expand_template(&cfg_cb.local_playlist_template, folder_name_from, &rel_from);
+                                                let rel_from = from_folder
+                                                    .strip_prefix(&cfg_cb.root_folder)
+                                                    .unwrap_or(&from_folder)
+                                                    .display()
+                                                    .to_string();
+                                                let playlist_name_from = rel_from.clone();
 
-                                                let folder_name_to = to_folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                                                let rel_to = to_folder.strip_prefix(&cfg_cb.root_folder).unwrap_or(&to_folder).display().to_string();
-                                                let playlist_name_to = util::expand_template(&cfg_cb.local_playlist_template, folder_name_to, &rel_to);
+                                                let rel_to = to_folder
+                                                    .strip_prefix(&cfg_cb.root_folder)
+                                                    .unwrap_or(&to_folder)
+                                                    .display()
+                                                    .to_string();
+                                                let playlist_name_to = rel_to.clone();
 
                                                 let extra = match serde_json::json!({"from": playlist_name_from, "to": playlist_name_to}).to_string() {
                                                     s => s,

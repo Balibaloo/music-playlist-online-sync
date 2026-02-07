@@ -275,29 +275,43 @@ impl Provider for SpotifyProvider {
     }
 
     async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<()> {
-        let bearer = self.get_bearer().await?;
         let url = format!("{}/playlists/{}", Self::api_base(), playlist_id);
         let body = json!({ "name": new_name });
-        let resp = self
-            .client
-            .put(&url)
-            .header(AUTHORIZATION, &bearer)
-            .json(&body)
-            .send()
-            .await?;
-        if resp.status().as_u16() == 401 {
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self.client.put(&url).header(AUTHORIZATION, &bearer2).json(&body).send().await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow!("rename failed: {}", resp2.status()));
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let bearer = self.get_bearer().await?;
+            let resp = self
+                .client
+                .put(&url)
+                .header(AUTHORIZATION, &bearer)
+                .json(&body)
+                .send()
+                .await?;
+            let status = resp.status();
+
+            if status.as_u16() == 401 && attempt == 1 {
+                // Refresh token once on 401, then retry.
+                self.ensure_token().await?;
+                continue;
+            }
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt <= 3 {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(2);
+                tokio::time::sleep(std::time::Duration::from_secs(retry_after + 1)).await;
+                continue;
+            }
+
+            if !status.is_success() {
+                return Err(anyhow!("rename failed: {}", status));
             }
             return Ok(());
         }
-        if !resp.status().is_success() {
-            return Err(anyhow!("rename failed: {}", resp.status()));
-        }
-        Ok(())
     }
 
     async fn add_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {

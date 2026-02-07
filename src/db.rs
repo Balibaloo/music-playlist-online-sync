@@ -122,43 +122,69 @@ pub fn load_credential_with_client(conn: &Connection, provider: &str) -> Result<
     Ok(row)
 }
 
-/// Get remote_id for playlist from playlist_map
-pub fn get_remote_playlist_id(conn: &Connection, playlist_name: &str) -> Result<Option<String>> {
+fn playlist_map_key(provider: &str, playlist_name: &str) -> String {
+    // Historically playlist_map was provider-agnostic and effectively
+    // stored Spotify IDs. To remain backward compatible, we treat bare
+    // playlist_name keys as belonging to Spotify and namespace other
+    // providers with a prefix.
+    if provider.eq_ignore_ascii_case("spotify") {
+        playlist_name.to_string()
+    } else {
+        format!("{}::{}", provider.to_lowercase(), playlist_name)
+    }
+}
+
+/// Get remote_id for playlist from playlist_map, scoped by provider
+pub fn get_remote_playlist_id(conn: &Connection, provider: &str, playlist_name: &str) -> Result<Option<String>> {
+    let key = playlist_map_key(provider, playlist_name);
     let mut stmt = conn.prepare("SELECT remote_id FROM playlist_map WHERE playlist_name = ?1 LIMIT 1")?;
-    let row = stmt.query_row(params![playlist_name], |r| r.get::<_, Option<String>>(0)).optional()?;
+    let row = stmt.query_row(params![key], |r| r.get::<_, Option<String>>(0)).optional()?;
     Ok(row.flatten())
 }
 
-/// Upsert playlist_map entry with remote_id
-pub fn upsert_playlist_map(conn: &Connection, playlist_name: &str, remote_id: &str) -> Result<()> {
+/// Upsert playlist_map entry with remote_id, scoped by provider
+pub fn upsert_playlist_map(conn: &Connection, provider: &str, playlist_name: &str, remote_id: &str) -> Result<()> {
+    let key = playlist_map_key(provider, playlist_name);
     conn.execute(
         "INSERT INTO playlist_map (playlist_name, remote_id, last_synced_at) VALUES (?1, ?2, strftime('%s','now')) ON CONFLICT(playlist_name) DO UPDATE SET remote_id = excluded.remote_id, last_synced_at = strftime('%s','now')",
-        params![playlist_name, remote_id],
+        params![key, remote_id],
     )?;
     Ok(())
 }
 
-/// Delete a playlist_map entry by playlist_name
-pub fn delete_playlist_map(conn: &Connection, playlist_name: &str) -> Result<()> {
+/// Delete a playlist_map entry by playlist_name, scoped by provider
+pub fn delete_playlist_map(conn: &Connection, provider: &str, playlist_name: &str) -> Result<()> {
+    let key = playlist_map_key(provider, playlist_name);
     conn.execute(
         "DELETE FROM playlist_map WHERE playlist_name = ?1",
-        params![playlist_name],
+        params![key],
     )?;
     Ok(())
 }
 
-/// Lookup a track cache entry by local path
-pub fn get_track_cache_by_local(conn: &Connection, local_path: &str) -> Result<Option<(Option<String>, Option<String>)>> {
+fn track_cache_key(provider: &str, local_path: &str) -> String {
+    // Keep legacy behavior for Spotify so existing rows remain valid.
+    if provider.eq_ignore_ascii_case("spotify") {
+        local_path.to_string()
+    } else {
+        format!("{}::{}", provider.to_lowercase(), local_path)
+    }
+}
+
+/// Lookup a track cache entry by local path, scoped by provider
+pub fn get_track_cache_by_local(conn: &Connection, provider: &str, local_path: &str) -> Result<Option<(Option<String>, Option<String>)>> {
+    let key = track_cache_key(provider, local_path);
     let mut stmt = conn.prepare("SELECT isrc, remote_id FROM track_cache WHERE local_path = ?1 LIMIT 1")?;
-    let row = stmt.query_row(params![local_path], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))).optional()?;
+    let row = stmt.query_row(params![key], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))).optional()?;
     Ok(row)
 }
 
-/// Upsert track cache entry: local_path -> (isrc, remote_id)
-pub fn upsert_track_cache(conn: &Connection, local_path: &str, isrc: Option<&str>, remote_id: Option<&str>) -> Result<()> {
+/// Upsert track cache entry: (provider, local_path) -> (isrc, remote_id)
+pub fn upsert_track_cache(conn: &Connection, provider: &str, local_path: &str, isrc: Option<&str>, remote_id: Option<&str>) -> Result<()> {
+    let key = track_cache_key(provider, local_path);
     conn.execute(
         "INSERT INTO track_cache (isrc, local_path, remote_id, resolved_at) VALUES (?1, ?2, ?3, strftime('%s','now')) ON CONFLICT(local_path) DO UPDATE SET isrc = excluded.isrc, remote_id = excluded.remote_id, resolved_at = strftime('%s','now')",
-        params![isrc, local_path, remote_id],
+        params![isrc, key, remote_id],
     )?;
     Ok(())
 }

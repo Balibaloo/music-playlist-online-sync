@@ -1,7 +1,6 @@
 use tempfile::tempdir;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
 
 use music_file_playlist_online_sync::watcher::{InMemoryTree, SyntheticEvent, LogicalOp};
 
@@ -16,7 +15,7 @@ fn in_memory_tree_applies_synthetic_events() {
     let mut f = File::create(&track_a).unwrap();
     writeln!(f, "data").unwrap();
 
-    let mut tree = InMemoryTree::build(&root, None).expect("build tree");
+    let mut tree = InMemoryTree::build(&root, None, None).expect("build tree");
     // file exists so node should have the track
     let folder_a = root.join("a");
     assert!(tree.nodes.contains_key(&folder_a));

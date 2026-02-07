@@ -1,7 +1,9 @@
 root_folder = "/srv/music"
 whitelist = "" # colon-separated; empty -> all subfolders
 local_playlist_template = "${folder_name}.m3u"
-remote_playlist_template = "${relative_path}"
+remote_playlist_template = "${relative_path}" # legacy/default template when structure-specific templates are empty
+remote_playlist_template_flat = "${relative_path}"
+remote_playlist_template_folders = "${relative_path}"
 playlist_description_template = ""
 playlist_order_mode = "append" # "append" or "sync_order"
 playlist_mode = "flat" # "flat" or "linked"

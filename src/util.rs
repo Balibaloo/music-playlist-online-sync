@@ -1,5 +1,19 @@
-pub fn expand_template(template: &str, folder_name: &str, relative_path: &str) -> String {
-    template.replace("${folder_name}", folder_name).replace("${relative_path}", relative_path)
+pub fn expand_template(template: &str, folder_name: &str, path_to_parent: &str) -> String {
+    // `path_to_parent` is intended to be the logical path from the
+    // configured root to the playlist folder's *parent* (or equivalent
+    // logical parent for remote playlists). Callers are responsible for
+    // choosing whether this is filesystem-style ("Artist/") or already
+    // flattened with the online delimiter ("Syncd| Artist| ").
+    //
+    // For backwards compatibility, we still expand the legacy
+    // "${relative_path}" placeholder as the full logical path to the
+    // playlist folder itself, i.e. `path_to_parent + folder_name`.
+    let full_path = format!("{}{}", path_to_parent, folder_name);
+
+    template
+        .replace("${folder_name}", folder_name)
+        .replace("${path_to_parent}", path_to_parent)
+        .replace("${relative_path}", &full_path)
 }
 
 /// Attempt to extract an ISRC code from the audio file's metadata tags.

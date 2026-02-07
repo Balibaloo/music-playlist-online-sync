@@ -1,6 +1,5 @@
 use tempfile::tempdir;
 use std::fs::{self, File};
-use std::io::Write;
 use std::time::Duration;
 
 use music_file_playlist_online_sync::config::Config;

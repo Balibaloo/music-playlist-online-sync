@@ -1,21 +1,30 @@
-root_folder = "/srv/music"
-whitelist = "" # colon-separated list; empty -> all under root
+root_folder = "/raid/shared/Media/Music/Collection/"
+whitelist = "/raid/shared/Media/Music/Collection/_Electronic/Electronic - House LoFi" # colon-separated list of regex patterns on full folder paths; empty -> all under root
 local_playlist_template = "${folder_name}.m3u"
-remote_playlist_template = "${relative_path}"
+remote_playlist_template = "${relative_path}" # fallback when structure-specific templates are empty
+remote_playlist_template_flat = "🔄 ${relative_path}"     # used for current flat setup
+remote_playlist_template_folders = "🔄 ${relative_path}"  # used if you switch to "folders" on providers that support it
+online_folder_flattening_delimiter = "| "
 playlist_description_template = ""
 playlist_order_mode = "append" # "append" or "sync_order"
 playlist_mode = "flat" # "flat" or "linked"
 linked_reference_format = "relative"
+file_extensions = ["*.mp3", "*.flac", "*.ogg", "*.wav", "*.mp4", "*.m4a"]
 debounce_ms = 250
-log_dir = "/var/log/music-sync"
+log_dir = "/tmp/music-sync-dev-Kex2"
+# Use dev DB path for testing
+db_path = "/tmp/music-sync-dev-Kex2/music-sync.db"
 token_refresh_interval = 3600
+#online_root_playlist = "Syncd"
+online_playlist_structure = "flat"
+
 
 # Worker / timing
 worker_interval_sec = 300
-nightly_reconcile_cron = "0 3 * * *" # cron expression
+#nightly_reconcile_cron = "0 3 * * *" # cron expression
 
 # Queue / DB
-queue_length_stop_cloud_sync_threshold = 10 # if null/unset -> disable self-stop behavior
+queue_length_stop_cloud_sync_threshold = 40 # if null/unset -> disable self-stop behavior
 
 # Retry / failure handling
 max_retries_on_error = 3

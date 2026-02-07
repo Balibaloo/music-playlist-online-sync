@@ -33,10 +33,10 @@ fn tidal_ensure_playlist_happy_path() {
         "refresh_token": null,
         "scope": ""
     }).to_string();
-    db::save_credential_raw(&conn, "tidal", &stored).unwrap();
+    db::save_credential_raw(&conn, "tidal", &stored, None, None).unwrap();
 
-    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone());
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None);
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move { provider.ensure_playlist("Test", "").await });
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), "tidal_pl_1");

@@ -67,7 +67,7 @@ Spotify
 
 ```sh
 # example (replace values)
-cargo run -- --config /tmp/music-sync-dev/config.toml Auth Spotify --client-id <ID> --client-secret <SECRET> --redirect-uri http://localhost/
+music-file-playlist-online-sync auth spotify
 ```
 
 Tidal

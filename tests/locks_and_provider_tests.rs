@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use tempfile::tempdir;
 use rusqlite::Connection;
 use music_file_playlist_online_sync::db;

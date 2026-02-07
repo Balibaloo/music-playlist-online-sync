@@ -663,6 +663,55 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                     }
                                                 }
                                                 info!("LogicalOp::PlaylistRename from_folder={:?}, to_folder={:?}", from_folder, to_folder);
+
+                                                // Rename the local playlist file on disk so that we don't
+                                                // leave behind a stale playlist with the old folder name.
+                                                let from_rel = from_folder
+                                                    .strip_prefix(&cfg_cb.root_folder)
+                                                    .unwrap_or(&from_folder)
+                                                    .to_path_buf();
+                                                let to_rel = to_folder
+                                                    .strip_prefix(&cfg_cb.root_folder)
+                                                    .unwrap_or(&to_folder)
+                                                    .to_path_buf();
+
+                                                let from_folder_name = from_folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                                                let to_folder_name = to_folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+                                                let from_parent = from_rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+                                                let to_parent = to_rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+
+                                                let from_parent_str = if from_parent.as_os_str().is_empty() {
+                                                    String::new()
+                                                } else {
+                                                    let mut s = from_parent.display().to_string();
+                                                    if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                                                        s.push(std::path::MAIN_SEPARATOR);
+                                                    }
+                                                    s
+                                                };
+
+                                                let to_parent_str = if to_parent.as_os_str().is_empty() {
+                                                    String::new()
+                                                } else {
+                                                    let mut s = to_parent.display().to_string();
+                                                    if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                                                        s.push(std::path::MAIN_SEPARATOR);
+                                                    }
+                                                    s
+                                                };
+
+                                                let from_playlist_name = util::expand_template(&cfg_cb.local_playlist_template, from_folder_name, &from_parent_str);
+                                                let to_playlist_name = util::expand_template(&cfg_cb.local_playlist_template, to_folder_name, &to_parent_str);
+
+                                                let from_playlist_path = from_folder.join(&from_playlist_name);
+                                                let to_playlist_path = to_folder.join(&to_playlist_name);
+
+                                                if from_playlist_path != to_playlist_path && from_playlist_path.exists() {
+                                                    if let Err(e) = std::fs::rename(&from_playlist_path, &to_playlist_path) {
+                                                        warn!("Failed to rename playlist file {:?} -> {:?}: {}", from_playlist_path, to_playlist_path, e);
+                                                    }
+                                                }
                                                 // debounce both source and destination folders and ancestors
                                                 if let Ok(mut dm) = debounce_map_cb.lock() {
                                                     dm.insert(from_folder.clone(), Instant::now() + Duration::from_millis(cfg_cb.debounce_ms));

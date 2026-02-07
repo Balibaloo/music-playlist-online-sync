@@ -424,8 +424,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                         if ev.paths.len() >= 2 {
                             let from = ev.paths[0].clone();
                             let to = ev.paths[1].clone();
-                            // if both are directories, it's a folder rename/move
-                            if from.is_dir() && to.is_dir() {
+                            if from.is_dir() || to.is_dir() {
                                 synths.push(SyntheticEvent::FolderRename { from, to });
                             } else {
                                 synths.push(SyntheticEvent::FileRename { from, to });

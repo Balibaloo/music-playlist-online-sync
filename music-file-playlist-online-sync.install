@@ -56,6 +56,8 @@ post_install() {
   echo "\nTo finish setup:"
   echo "1. Review the config file (auto-created if missing):"
   echo "   sudo nano /etc/music-sync/config.toml   # edit root_folder, db_path, credentials"
+  echo "   NOTE: the music-file-playlist-online-sync user must have read+write access to root_folder"
+  echo "         so it can create/update .m3u playlists (e.g. via setfacl or a shared group)."
   echo "2. Reload systemd and choose how to run sync:"
   echo "   sudo systemctl daemon-reload"
   echo "   # Recommended: continuous watcher plus timers:"

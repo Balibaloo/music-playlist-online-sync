@@ -1,4 +1,8 @@
-root_folder = "/music"
+root_folder = "/music" # NOTE: the systemd services run as the
+						  # "music-file-playlist-online-sync" user.
+						  # That user must have read+write access
+						  # to this directory tree in order to
+						  # create/update .m3u playlist files.
 whitelist = "" # colon-separated list of regex patterns applied to full folder paths; empty -> all under root
 local_playlist_template = "${folder_name}.m3u"
 remote_playlist_template = "${relative_path}" # legacy/default template applied when structure-specific templates are empty

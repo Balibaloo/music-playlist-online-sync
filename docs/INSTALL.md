@@ -38,7 +38,20 @@ systemctl start music-file-playlist-online-sync-worker.service
 
 Configuration
 
-Edit `/etc/music-sync/config.toml` to set `root_folder`, `db_path`, and credentials. See `config/example-config.toml` for all options, including:
+Edit `/etc/music-sync/config.toml` to set `root_folder`, `db_path`, and credentials.
+
+**Filesystem permissions requirement**
+
+The systemd services run as the `music-file-playlist-online-sync` user. That user must be able to **read and write** under your
+configured `root_folder` in order to create/update local `.m3u` playlist files. A simple way to grant this without changing
+ownership away from your normal user is to use ACLs, for example:
+
+```sh
+sudo setfacl -R -m u:music-file-playlist-online-sync:rwx /path/to/your/root_folder
+sudo setfacl -R -d -m u:music-file-playlist-online-sync:rwx /path/to/your/root_folder
+```
+
+See `config/example-config.toml` for all options, including:
 - `local_playlist_template` for on-disk `.m3u` filenames
 - `online_root_playlist`, `online_playlist_structure`, and `online_folder_flattening_delimiter` for how online playlists are grouped
 - `remote_playlist_template_flat` / `remote_playlist_template_folders` (and the legacy `remote_playlist_template`) for customizing remote playlist display names, supporting `${folder_name}`, `${path_to_parent}`, and the legacy `${relative_path}` alias (expanded as `path_to_parent + folder_name`).

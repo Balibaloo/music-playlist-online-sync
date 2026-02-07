@@ -1,0 +1,9 @@
+[Unit]
+Description=Music File Playlist Online Sync - Nightly Reconcile
+After=network.target
+
+[Service]
+Type=oneshot
+User=music-file-playlist-online-sync
+ExecStart=/usr/bin/music-file-playlist-online-sync --config /etc/music-sync/config.toml reconcile
+WorkingDirectory=/var/lib/music-sync

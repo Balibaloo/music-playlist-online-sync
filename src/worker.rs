@@ -793,6 +793,16 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
     // collect thread handles for the enqueue operations so we can join before returning
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
         for (folder, _node) in tree.nodes.iter() {
+        // Extra safety: respect the folder whitelist again here before
+        // writing playlists and enqueueing events, so reconciliation
+        // never touches non-whitelisted folders even if they slipped
+        // into the tree for any reason.
+        if let Some(ref wlvec) = tree.whitelist {
+            let path_str = folder.to_string_lossy();
+            if !wlvec.iter().any(|re| re.is_match(&path_str)) {
+                continue;
+            }
+        }
         let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).to_path_buf();
 

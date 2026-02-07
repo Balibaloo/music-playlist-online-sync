@@ -1,5 +1,5 @@
 root_folder = "/raid/shared/Media/Music/Collection/"
-whitelist = "/raid/shared/Media/Music/Collection/_Electronic/Electronic - House LoFi" # colon-separated list of regex patterns on full folder paths; empty -> all under root
+whitelist = "_Electronic/Electronic - House LoFi" # colon-separated list of regex patterns on full folder paths; empty -> all under root
 local_playlist_template = "${folder_name}.m3u"
 remote_playlist_template = "${relative_path}" # fallback when structure-specific templates are empty
 remote_playlist_template_flat = "🔄 ${relative_path}"     # used for current flat setup

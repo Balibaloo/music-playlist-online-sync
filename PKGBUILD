@@ -26,6 +26,7 @@ package() {
   install -Dm644 systemd/music-file-playlist-online-sync-worker.service "$pkgdir/usr/lib/systemd/system/music-file-playlist-online-sync-worker.service"
   install -Dm644 systemd/music-file-playlist-online-sync-worker.timer "$pkgdir/usr/lib/systemd/system/music-file-playlist-online-sync-worker.timer"
   install -Dm644 systemd/music-file-playlist-online-sync-watcher.service "$pkgdir/usr/lib/systemd/system/music-file-playlist-online-sync-watcher.service"
+  install -Dm644 systemd/music-file-playlist-online-sync-reconcile.service "$pkgdir/usr/lib/systemd/system/music-file-playlist-online-sync-reconcile.service"
   install -Dm644 systemd/music-file-playlist-online-sync-reconcile.timer "$pkgdir/usr/lib/systemd/system/music-file-playlist-online-sync-reconcile.timer"
 }
 

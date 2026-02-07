@@ -26,6 +26,8 @@ enum Commands {
     Watcher,
     /// Run the worker once (one-shot)
     Worker,
+    /// Run a full reconciliation scan of the root folder
+    Reconcile,
     /// Validate config file and exit
     ConfigValidate,
     /// Auth helpers
@@ -88,6 +90,13 @@ async fn main() -> Result<()> {
         }
         Commands::Worker => {
             lib::worker::run_worker_once(&cfg).await?;
+        }
+        Commands::Reconcile => {
+            // Nightly reconciliation is synchronous and does not require Tokio.
+            if let Err(e) = lib::worker::run_nightly_reconcile(&cfg) {
+                eprintln!("Reconcile failed: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::ConfigValidate => {
             match lib::config::Config::from_path(&cli.config.as_path()) {

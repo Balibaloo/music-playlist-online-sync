@@ -490,6 +490,13 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                     for op in ops {
                                         match op {
                                             LogicalOp::Add { playlist_folder, track_path } => {
+                                                // Respect folder whitelist before enqueuing events
+                                                if let Some(ref wlvec) = t.whitelist {
+                                                    let path_str = playlist_folder.to_string_lossy();
+                                                    if !wlvec.iter().any(|re| re.is_match(&path_str)) {
+                                                        continue;
+                                                    }
+                                                }
                                                 info!("LogicalOp::Add playlist_folder={:?}, track_path={:?}", playlist_folder, track_path);
 
                                                 // Build the list of playlist folders that should reflect this
@@ -542,6 +549,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 });
                                             }
                                             LogicalOp::Remove { playlist_folder, track_path } => {
+                                                if let Some(ref wlvec) = t.whitelist {
+                                                    let path_str = playlist_folder.to_string_lossy();
+                                                    if !wlvec.iter().any(|re| re.is_match(&path_str)) {
+                                                        continue;
+                                                    }
+                                                }
                                                 info!("LogicalOp::Remove playlist_folder={:?}, track_path={:?}", playlist_folder, track_path);
 
                                                 let mut target_folders: Vec<std::path::PathBuf> = Vec::new();
@@ -601,6 +614,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
                                             }
                                             LogicalOp::Delete { playlist_folder } => {
+                                                if let Some(ref wlvec) = t.whitelist {
+                                                    let path_str = playlist_folder.to_string_lossy();
+                                                    if !wlvec.iter().any(|re| re.is_match(&path_str)) {
+                                                        continue;
+                                                    }
+                                                }
                                                 info!("LogicalOp::Delete playlist_folder={:?}", playlist_folder);
                                                 // For deletes, debounce only ancestor folders (for linked playlists),
                                                 // and enqueue a Delete event for the removed playlist itself.
@@ -633,6 +652,14 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 });
                                             }
                                             LogicalOp::PlaylistRename { from_folder, to_folder } => {
+                                                // Use the source folder to decide whether this playlist
+                                                // should be tracked at all.
+                                                if let Some(ref wlvec) = t.whitelist {
+                                                    let path_str = from_folder.to_string_lossy();
+                                                    if !wlvec.iter().any(|re| re.is_match(&path_str)) {
+                                                        continue;
+                                                    }
+                                                }
                                                 info!("LogicalOp::PlaylistRename from_folder={:?}, to_folder={:?}", from_folder, to_folder);
                                                 // debounce both source and destination folders and ancestors
                                                 if let Ok(mut dm) = debounce_map_cb.lock() {

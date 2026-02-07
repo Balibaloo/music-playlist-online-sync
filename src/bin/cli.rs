@@ -6,7 +6,7 @@ use tracing_subscriber::prelude::*;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_log::LogTracer;
 use tracing::subscriber as tracing_subscriber_global;
-use anyhow::Result;
+use anyhow::{Result, Context};
 use music_file_playlist_online_sync as lib;
 use lib::api::Provider;
 use lib::config::Config;
@@ -67,7 +67,8 @@ enum AuthTestCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = Config::from_path(&cli.config)?;
+    let cfg = Config::from_path(&cli.config)
+        .with_context(|| format!("loading config from {}", cli.config.display()))?;
 
     // Initialize log->tracing bridge and structured logging.
     // Logs go to both stdout and a daily-rotated file in cfg.log_dir.
@@ -93,10 +94,12 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Watcher => {
-            lib::watcher::run_watcher(&cfg)?;
+            lib::watcher::run_watcher(&cfg)
+                .with_context(|| "running watcher".to_string())?;
         }
         Commands::Worker => {
-            lib::worker::run_worker_once(&cfg).await?;
+            lib::worker::run_worker_once(&cfg).await
+                .with_context(|| "running worker".to_string())?;
         }
         Commands::Reconcile => {
             // Nightly reconciliation is synchronous and does not require Tokio.

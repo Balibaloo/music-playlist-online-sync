@@ -1,5 +1,5 @@
 use crate::models::{Event, EventAction};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use chrono::Utc;
@@ -11,7 +11,47 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
 }
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
-    conn.execute_batch(std::fs::read_to_string("db/schema.sql")?.as_str())?;
+    // In development/tests, the schema file lives at db/schema.sql relative
+    // to the project root. In packaged installs, it is installed to
+    // /usr/share/music-file-playlist-online-sync/schema.sql and the
+    // .install hook already applies it once at install/upgrade time.
+    //
+    // At runtime we treat missing schema files as "no-op" so that
+    // packaged binaries do not fail if the on-disk schema file is absent.
+
+    // Try local development path first.
+    let candidates = [
+        "db/schema.sql",
+        "/usr/share/music-file-playlist-online-sync/schema.sql",
+    ];
+
+    let mut last_err: Option<std::io::Error> = None;
+    for path in &candidates {
+        match std::fs::read_to_string(path) {
+            Ok(sql) => {
+                conn.execute_batch(&sql)
+                    .with_context(|| format!("applying DB schema from {}", path))?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Try next candidate.
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("reading DB schema from {}", path)),
+        }
+    }
+
+    // If we get here, none of the candidate schema files were found.
+    // In a packaged install this is fine because schema is applied by
+    // the .install script; for dev, it means migrations are simply
+    // skipped.
+    if let Some(e) = last_err {
+        tracing::debug!(
+            "DB schema file not found at any known location; skipping migrations: {}",
+            e
+        );
+    }
     Ok(())
 }
 

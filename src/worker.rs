@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::db;
 use crate::collapse::collapse_events;
 use crate::models::{Event, EventAction};
-use anyhow::Result;
+use anyhow::{Result, Context};
 
 use std::sync::Arc;
 use uuid::Uuid;
@@ -275,8 +275,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     let _conn = tokio::task::spawn_blocking({
         let db_path = cfg.db_path.clone();
         move || -> Result<(), anyhow::Error> {
-            let c = rusqlite::Connection::open(db_path)?;
-            db::run_migrations(&c)?;
+            let path_display = db_path.display().to_string();
+            let c = rusqlite::Connection::open(&db_path)
+                .with_context(|| format!("opening DB for migrations at {}", path_display))?;
+            db::run_migrations(&c)
+                .with_context(|| format!("running DB migrations using schema for {}", path_display))?;
             Ok(())
         }
     })
@@ -286,8 +289,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     let events: Vec<Event> = tokio::task::spawn_blocking({
         let db_path = cfg.db_path.clone();
         move || -> Result<Vec<Event>, anyhow::Error> {
-            let conn = rusqlite::Connection::open(db_path)?;
-            db::fetch_unsynced_events(&conn).map_err(|e| e.into())
+            let path_display = db_path.display().to_string();
+            let conn = rusqlite::Connection::open(&db_path)
+                .with_context(|| format!("opening DB for fetching unsynced events at {}", path_display))?;
+            db::fetch_unsynced_events(&conn)
+                .map_err(|e| e.into())
         }
     })
     .await??;
@@ -310,7 +316,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     // Spotify
     let db_path = cfg.db_path.clone();
     let has_spotify = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
-        let conn = rusqlite::Connection::open(db_path)?;
+        let path_display = db_path.display().to_string();
+        let conn = rusqlite::Connection::open(&db_path)
+            .with_context(|| format!("opening DB for loading spotify credentials at {}", path_display))?;
         Ok(db::load_credential_with_client(&conn, "spotify")?.is_some())
     })
     .await??;
@@ -321,7 +329,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     // Tidal
     let db_path = cfg.db_path.clone();
     let has_tidal = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
-        let conn = rusqlite::Connection::open(db_path)?;
+        let path_display = db_path.display().to_string();
+        let conn = rusqlite::Connection::open(&db_path)
+            .with_context(|| format!("opening DB for loading tidal credentials at {}", path_display))?;
         Ok(db::load_credential_with_client(&conn, "tidal")?.is_some())
     })
     .await??;

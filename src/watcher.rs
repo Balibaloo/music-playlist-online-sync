@@ -5,6 +5,7 @@ use crate::db;
 use crate::playlist;
 use crate::util;
 use crate::models::EventAction;
+use anyhow::Context;
 use notify::{Config as NotifyConfig, Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
 use notify::event::RemoveKind;
 use std::collections::{HashMap, HashSet};
@@ -276,14 +277,16 @@ pub enum SyntheticEvent {
 pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     info!("Starting watcher with root {:?}", cfg.root_folder);
     // Open DB (blocking)
-    let _conn = db::open_or_create(&cfg.db_path)?;
+    let _conn = db::open_or_create(&cfg.db_path)
+        .with_context(|| format!("opening or creating DB at {}", cfg.db_path.display()))?;
 
     // Build initial in-memory tree, respecting optional whitelist and file_extensions
     let tree = InMemoryTree::build(
         &cfg.root_folder,
         if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) },
         Some(&cfg.file_extensions),
-    )?;
+    )
+    .with_context(|| format!("building in-memory tree from root {}", cfg.root_folder.display()))?;
     info!("Initial scan complete: {} folders", tree.nodes.len());
 
     // Initial playlist writes (flat mode)

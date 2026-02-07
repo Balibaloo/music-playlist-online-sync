@@ -5,6 +5,13 @@ Cargo.lock
 # Packaging
 /packaging/dist/
 *.pkg.tar.zst
+/pkg/
+
+# makepkg git clones / local test repos
+/music-playlist-online-sync/
+/music-playlist-online-sync.git
+/src/music-playlist-online-sync/
+/src/music-playlist-online-sync.git
 
 # Editor/IDE
 *.swp

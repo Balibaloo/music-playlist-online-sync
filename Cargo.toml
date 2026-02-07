@@ -14,7 +14,7 @@ toml = "0.7"
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.30", features = ["macros", "rt-multi-thread", "time"] }
 notify = "6.1"
-rusqlite = { version = "0.29", features = ["bundled"] }
+rusqlite = "0.28"
 dirs = "4.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

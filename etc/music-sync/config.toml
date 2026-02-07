@@ -1,5 +1,5 @@
 root_folder = "/raid/shared/Media/Music/Collection/"
-whitelist = "_Electronic/Electronic - House LoFi" # colon-separated list of regex patterns on full folder paths; empty -> all under root
+whitelist = "_Electronic/Electronic - House LoFi.*" # colon-separated list of regex patterns on full folder paths; empty -> all under root
 local_playlist_template = "${folder_name}.m3u"
 remote_playlist_template = "${relative_path}" # fallback when structure-specific templates are empty
 remote_playlist_template_flat = "🔄 ${relative_path}"     # used for current flat setup
@@ -11,9 +11,9 @@ playlist_mode = "flat" # "flat" or "linked"
 linked_reference_format = "relative"
 file_extensions = ["*.mp3", "*.flac", "*.ogg", "*.wav", "*.mp4", "*.m4a"]
 debounce_ms = 250
-log_dir = "/tmp/music-sync-dev-Kex2"
+log_dir = "/var/log/music-sync"
 # Use dev DB path for testing
-db_path = "/tmp/music-sync-dev-Kex2/music-sync.db"
+db_path = "/var/lib/music-sync/music-sync.db"
 token_refresh_interval = 3600
 #online_root_playlist = "Syncd"
 online_playlist_structure = "flat"

@@ -24,7 +24,7 @@ worker_interval_sec = 300
 #nightly_reconcile_cron = "0 3 * * *" # cron expression
 
 # Queue / DB
-queue_length_stop_cloud_sync_threshold = 40 # if null/unset -> disable self-stop behavior
+# queue_length_stop_cloud_sync_threshold = 40 # if null/unset -> disable self-stop behavior
 
 # Retry / failure handling
 max_retries_on_error = 3

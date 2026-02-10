@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber;
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::prelude::*;
@@ -15,8 +15,8 @@ use lib::config::Config;
 #[command(name = "music-file-playlist-online-sync", version)]
 struct Cli {
     /// Path to config TOML
-    #[arg(long, value_name = "FILE", default_value = "config/example-config.toml")]
-    config: PathBuf,
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -67,8 +67,23 @@ enum AuthTestCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = Config::from_path(&cli.config)
-        .with_context(|| format!("loading config from {}", cli.config.display()))?;
+    // Resolve config path: explicit --config overrides; otherwise prefer
+    // system-wide /etc/music-sync/config.toml and fall back to the
+    // repository example config for local/dev usage.
+    let resolved_config_path: PathBuf = match &cli.config {
+        Some(p) => p.clone(),
+        None => {
+            let etc_path = Path::new("/etc/music-sync/config.toml");
+            if etc_path.exists() {
+                etc_path.to_path_buf()
+            } else {
+                PathBuf::from("config/example-config.toml")
+            }
+        }
+    };
+
+    let cfg = Config::from_path(&resolved_config_path)
+        .with_context(|| format!("loading config from {}", resolved_config_path.display()))?;
 
     // Initialize log->tracing bridge and structured logging.
     // Logs go to both stdout and a daily-rotated file in cfg.log_dir.
@@ -109,7 +124,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::ConfigValidate => {
-            match lib::config::Config::from_path(&cli.config.as_path()) {
+            match lib::config::Config::from_path(&resolved_config_path.as_path()) {
                 Ok(_) => println!("OK"),
                 Err(e) => {
                     eprintln!("Config validation failed: {}", e);

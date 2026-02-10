@@ -768,7 +768,11 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 let from_playlist_name = util::expand_template(&cfg_cb.local_playlist_template, from_folder_name, &from_parent_str);
                                                 let to_playlist_name = util::expand_template(&cfg_cb.local_playlist_template, to_folder_name, &to_parent_str);
 
-                                                let from_playlist_path = from_folder.join(&from_playlist_name);
+                                                // After a folder rename/move, the playlist file that was
+                                                // previously under `from_folder` is now physically located
+                                                // under `to_folder`. Rename that file in-place so we don't
+                                                // accumulate stale playlists with old names.
+                                                let from_playlist_path = to_folder.join(&from_playlist_name);
                                                 let to_playlist_path = to_folder.join(&to_playlist_name);
 
                                                 if from_playlist_path != to_playlist_path && from_playlist_path.exists() {

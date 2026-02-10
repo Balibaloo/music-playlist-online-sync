@@ -202,6 +202,19 @@ pub fn delete_playlist_map(conn: &Connection, provider: &str, playlist_name: &st
     Ok(())
 }
 
+/// Migrate a playlist_map entry from one logical playlist name to another,
+/// scoped by provider. Keeps the same remote_id but updates the key so that
+/// future events keyed by the new logical name reuse the existing remote
+/// playlist instead of creating a duplicate.
+pub fn migrate_playlist_map(conn: &Connection, provider: &str, from_playlist_name: &str, to_playlist_name: &str) -> Result<()> {
+    if let Some(remote_id) = get_remote_playlist_id(conn, provider, from_playlist_name)? {
+        // Upsert mapping under the new logical name, then delete the old key.
+        upsert_playlist_map(conn, provider, to_playlist_name, &remote_id)?;
+        delete_playlist_map(conn, provider, from_playlist_name)?;
+    }
+    Ok(())
+}
+
 fn track_cache_key(provider: &str, local_path: &str) -> String {
     // Keep legacy behavior for Spotify so existing rows remain valid.
     if provider.eq_ignore_ascii_case("spotify") {

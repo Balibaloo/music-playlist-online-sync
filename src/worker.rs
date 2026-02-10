@@ -724,7 +724,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         }
 
         // Apply rename first
-        if let Some((_from, to)) = rename_opt {
+        if let Some((from, to)) = rename_opt.clone() {
             let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to);
             let mut attempt = 0u32;
             loop {
@@ -733,6 +733,21 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 match res {
                     Ok(_) => {
                         log::info!("Renamed remote playlist {} -> {}", remote_id, new_remote_name);
+                        // On successful explicit rename, migrate the playlist_map
+                        // entry so that the logical playlist key follows the
+                        // folder rename. This prevents a subsequent run for the
+                        // new logical name from calling ensure_playlist and
+                        // creating a duplicate remote playlist.
+                        let db_path = cfg.db_path.clone();
+                        let prov = provider.name().to_string();
+                        let pl_from = playlist_name.clone();
+                        let pl_to = to.clone();
+                        let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                            let conn = rusqlite::Connection::open(db_path)?;
+                            crate::db::migrate_playlist_map(&conn, &prov, &pl_from, &pl_to)?;
+                            Ok(())
+                        })
+                        .await;
                         // update playlist_map name? Here we keep playlist_name as local key; remote_id unchanged.
                         break;
                     }

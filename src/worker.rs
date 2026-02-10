@@ -8,6 +8,20 @@ use anyhow::{Result, Context};
 use std::sync::Arc;
 use uuid::Uuid;
 
+const PHASE_WIDTH: usize = 10;
+
+fn log_run_tag(run_id: &str) -> String {
+    format!("[RUN:{run}]", run = run_id)
+}
+
+fn log_playlist_tag(playlist: &str, provider: &str) -> String {
+    format!("[PL:\"{}\" | {}]", playlist, provider)
+}
+
+fn log_phase_tag(phase: &str) -> String {
+    format!("[PH:{:<width$}]", phase, width = PHASE_WIDTH)
+}
+
 /// Compute the set of remote track URIs that should be present for a playlist
 /// based on the current local playlist file contents.
 ///
@@ -271,6 +285,8 @@ fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key:
 /// Worker orchestration: read unsynced events, group by playlist, collapse, apply rename then track adds/removes.
 /// Adds per-playlist processing lease to avoid concurrent workers processing the same playlist.
 pub async fn run_worker_once(cfg: &Config) -> Result<()> {
+    let worker_id = Uuid::new_v4().to_string();
+
     // Ensure DB migrations are run (blocking)
     let _conn = tokio::task::spawn_blocking({
         let db_path = cfg.db_path.clone();
@@ -299,14 +315,19 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     .await??;
 
     if events.is_empty() {
-        log::info!("No pending events");
+        log::info!("{} No pending events", log_run_tag(&worker_id));
         return Ok(());
     }
 
     // Backpressure
     if let Some(thresh) = cfg.queue_length_stop_cloud_sync_threshold {
         if events.len() as u64 > thresh {
-            log::warn!("Queue length {} > threshold {}; stopping worker processing", events.len(), thresh);
+            log::warn!(
+                "{} Queue length {} > threshold {}; stopping worker processing",
+                log_run_tag(&worker_id),
+                events.len(),
+                thresh
+            );
             return Ok(());
         }
     }
@@ -323,7 +344,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     })
     .await??;
     if has_spotify {
-        log::info!("Using Spotify provider");
+        log::info!("{} Using Spotify provider", log_run_tag(&worker_id));
         providers.push(("spotify".to_string(), Arc::new(SpotifyProvider::new(String::new(), String::new(), cfg.db_path.clone()))));
     }
     // Tidal
@@ -336,7 +357,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     })
     .await??;
     if has_tidal {
-        log::info!("Using Tidal provider");
+        log::info!("{} Using Tidal provider", log_run_tag(&worker_id));
         providers.push((
             "tidal".to_string(),
             Arc::new(TidalProvider::new(
@@ -353,7 +374,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     }
     // If no real providers, do not consume the queue
     if providers.is_empty() {
-        log::warn!("No valid provider credentials configured. Queue will not be consumed.");
+        log::warn!(
+            "{} No valid provider credentials configured. Queue will not be consumed.",
+            log_run_tag(&worker_id)
+        );
         return Ok(());
     }
 
@@ -364,15 +388,20 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         groups.entry(ev.playlist_name.clone()).or_default().push(ev);
     }
 
-    let worker_id = Uuid::new_v4().to_string();
-
     // For each playlist, process all providers
     // This ensures that for a given playlist, all configured
     // providers are updated before moving on to the next one.
     for (playlist_name, evs) in &groups {
         // Process providers sequentially (safety). Could be parallelized with locks.
         for (provider_name, provider) in &providers {
-            log::info!("Attempting to process playlist {} with provider {}", playlist_name, provider_name);
+            let pl_tag = log_playlist_tag(playlist_name, provider_name);
+            log::info!(
+                "{} {} {} starting playlist processing (events={})",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("START"),
+                evs.len()
+            );
 
             // Try acquire lock (TTL = 10 minutes default)
             let lock_acquired = tokio::task::spawn_blocking({
@@ -387,7 +416,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             .await??;
 
             if !lock_acquired {
-                log::info!("Skipped {} because lock could not be acquired", playlist_name);
+                log::info!(
+                    "{} {} {} skipped: lock not acquired",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("LOCK")
+                );
                 continue;
             }
 
@@ -397,7 +431,6 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             // Collapse events
             let mut collapsed = collapse_events(evs);
 
-        // Find rename/delete and collect track ops
         let mut rename_opt: Option<(String, String)> = None;
         let mut has_delete: bool = false;
         let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
@@ -414,6 +447,29 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         for e in evs {
             original_ids.push(e.id);
         }
+
+        let adds = track_ops
+            .iter()
+            .filter(|(a, _)| matches!(a, EventAction::Add))
+            .count();
+        let removes = track_ops
+            .iter()
+            .filter(|(a, _)| matches!(a, EventAction::Remove))
+            .count();
+        let renames = if rename_opt.is_some() { 1 } else { 0 };
+        let deletes = if has_delete { 1 } else { 0 };
+
+        log::info!(
+            "{} {} {} events_collapsed adds={} removes={} deletes={} renames={} original_ids={}",
+            log_run_tag(&worker_id),
+            pl_tag,
+            log_phase_tag("COLLAPSE"),
+            adds,
+            removes,
+            deletes,
+            renames,
+            original_ids.len()
+        );
 
         // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed).
         let remote_id_opt = tokio::task::spawn_blocking({
@@ -437,15 +493,35 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     let res = provider.delete_playlist(&remote_id).await;
                     match res {
                         Ok(_) => {
-                            log::info!("Deleted remote playlist {} ({})", playlist_name, remote_id);
+                            log::info!(
+                                "{} {} {} deleted_remote_playlist id={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("DELETE"),
+                                remote_id
+                            );
                             break;
                         }
                         Err(e) => {
                             if attempt >= cfg.max_retries_on_error {
-                                log::error!("Delete failed after {} attempts: {}", attempt, e);
+                                log::error!(
+                                    "{} {} {} delete_failed attempts={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("DELETE"),
+                                    attempt,
+                                    e
+                                );
                                 break;
                             } else {
-                                log::warn!("Delete attempt {} failed: {}. Retrying...", attempt, e);
+                                log::warn!(
+                                    "{} {} {} delete_retry attempt={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("DELETE"),
+                                    attempt,
+                                    e
+                                );
                                 tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                                 continue;
                             }
@@ -453,7 +529,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     }
                 }
             } else {
-                log::info!("No remote playlist id for {}; skipping remote delete", playlist_name);
+                log::info!(
+                    "{} {} {} no_remote_id_for_delete",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("DELETE")
+                );
             }
 
             // Remove local playlist_map entry regardless of whether remote deletion succeeded
@@ -488,6 +569,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             })
             .await?;
 
+            log::info!(
+                "{} {} {} playlist_deleted_and_events_synced count={}",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("FINALIZE"),
+                original_ids.len()
+            );
+
             // Move to next playlist/provider
             continue;
         }
@@ -497,17 +586,19 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         let mut reconcile_desired: Option<Vec<String>> = None;
         if !has_delete {
             log::info!(
-                "Reconcile: computing desired remote URIs for playlist {} on provider {}",
-                playlist_name,
-                provider.name()
+                "{} {} {} reconcile_compute_desired_uris",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("RESOLVE")
             );
             match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone()).await {
                 Ok(desired) => {
                     log::info!(
-                        "Reconcile: computed {} desired tracks for playlist {} on provider {}",
-                        desired.len(),
-                        playlist_name,
-                        provider.name()
+                        "{} {} {} reconcile_desired_uris_computed count={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("RESOLVE"),
+                        desired.len()
                     );
                     if !desired.is_empty() {
                         reconcile_desired = Some(desired);
@@ -515,9 +606,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 }
                 Err(e) => {
                     log::warn!(
-                        "Reconcile: failed to compute desired URIs for playlist {} on provider {}: {}",
-                        playlist_name,
-                        provider.name(),
+                        "{} {} {} reconcile_compute_desired_uris_failed error={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("RESOLVE"),
                         e
                     );
                 }
@@ -547,7 +639,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     rid
                 }
                 Err(e) => {
-                    log::error!("Failed to create remote playlist for {}: {}", playlist_name, e);
+                    log::error!(
+                        "{} {} {} ensure_remote_playlist_failed error={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("REMOTE_ID"),
+                        e
+                    );
                     // release lock and continue
                     let (dbp, pln, wid) = release_on_exit.clone();
                     let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
@@ -568,10 +666,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         match provider.playlist_is_valid(&remote_id).await {
             Ok(false) => {
                 log::warn!(
-                    "Remote playlist {} (id {}) is no longer accessible on provider {}; recreating and updating mapping",
-                    playlist_name,
-                    remote_id,
-                    provider.name()
+                    "{} {} {} remote_playlist_inaccessible id={}",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("REMOTE_ID"),
+                    remote_id
                 );
                 match provider.ensure_playlist(&remote_display_name, "").await {
                     Ok(new_id) => {
@@ -587,18 +686,20 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         .await??;
 
                         log::info!(
-                            "Recreated remote playlist {} with new id {} for provider {} after detecting deletion/unfollow",
-                            playlist_name,
-                            new_id,
-                            provider.name()
+                            "{} {} {} remote_playlist_recreated new_id={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("REMOTE_ID"),
+                            new_id
                         );
                         remote_id = new_id;
                     }
                     Err(e) => {
                         log::error!(
-                            "Failed to recreate inaccessible playlist {} for provider {}: {}",
-                            playlist_name,
-                            provider.name(),
+                            "{} {} {} remote_playlist_recreate_failed error={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("REMOTE_ID"),
                             e
                         );
 
@@ -619,10 +720,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
             Err(e) => {
                 log::warn!(
-                    "playlist_is_valid check failed for playlist {} (id {}) on provider {}: {}",
-                    playlist_name,
+                    "{} {} {} playlist_is_valid_check_failed id={} error={}",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("REMOTE_ID"),
                     remote_id,
-                    provider.name(),
                     e
                 );
             }
@@ -644,7 +746,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 match res {
                     Ok(_) => {
                         log::info!(
-                            "Ensured remote playlist {} has display name {}",
+                            "{} {} {} ensured_display_name id={} name={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RENAME"),
                             remote_id,
                             remote_display_name
                         );
@@ -657,10 +762,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         // recreate it from local state and update mappings.
                         if s.contains("tidal rename failed: 404 Not Found") && s.contains("Playlists with id") {
                             log::warn!(
-                                "Remote playlist {} (id {}) not found on provider {}; recreating before config-driven rename...",
-                                playlist_name,
-                                remote_id,
-                                provider.name()
+                                "{} {} {} missing_before_cfg_rename id={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
+                                remote_id
                             );
 
                             match provider.ensure_playlist(&remote_display_name, "").await {
@@ -678,10 +784,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                                     remote_id = new_id;
                                     log::info!(
-                                        "Recreated remote playlist {} with new id {} for provider {} during config-driven rename",
-                                        playlist_name,
-                                        remote_id,
-                                        provider.name()
+                                        "{} {} {} recreated_before_cfg_rename new_id={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("RENAME"),
+                                        remote_id
                                     );
 
                                     // Newly created playlist already has the desired
@@ -690,9 +797,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                 }
                                 Err(err) => {
                                     log::error!(
-                                        "Failed to recreate missing playlist {} for provider {} during config-driven rename: {}",
-                                        playlist_name,
-                                        provider.name(),
+                                        "{} {} {} recreate_before_cfg_rename_failed error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("RENAME"),
                                         err
                                     );
                                     break;
@@ -702,7 +810,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                         if attempt >= cfg.max_retries_on_error {
                             log::error!(
-                                "Config-driven rename failed after {} attempts: {}",
+                                "{} {} {} cfg_rename_failed attempts={} error={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
                                 attempt,
                                 e
                             );
@@ -710,7 +821,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         } else {
                             let exp = std::cmp::min(1u64 << attempt, 60);
                             log::warn!(
-                                "Config-driven rename attempt {} failed: {}. Retrying in {}s...",
+                                "{} {} {} cfg_rename_retry attempt={} error={} backoff_s={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
                                 attempt,
                                 e,
                                 exp
@@ -732,7 +846,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 let res = provider.rename_playlist(&remote_id, &new_remote_name).await;
                 match res {
                     Ok(_) => {
-                        log::info!("Renamed remote playlist {} -> {}", remote_id, new_remote_name);
+                        log::info!(
+                            "{} {} {} explicit_rename id={} new_name={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RENAME"),
+                            remote_id,
+                            new_remote_name
+                        );
                         // On successful explicit rename, migrate the playlist_map
                         // entry so that the logical playlist key follows the
                         // folder rename. This prevents a subsequent run for the
@@ -759,10 +880,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         // using the new target name.
                         if s.contains("tidal rename failed: 404 Not Found") && s.contains("Playlists with id") {
                             log::warn!(
-                                "Remote playlist {} (id {}) not found on provider {}; recreating before explicit rename...",
-                                playlist_name,
-                                remote_id,
-                                provider.name()
+                                "{} {} {} missing_before_explicit_rename id={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
+                                remote_id
                             );
 
                             match provider.ensure_playlist(&new_remote_name, "").await {
@@ -780,10 +902,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                                     remote_id = new_id;
                                     log::info!(
-                                        "Recreated remote playlist {} with new id {} for provider {} during explicit rename",
-                                        playlist_name,
-                                        remote_id,
-                                        provider.name()
+                                        "{} {} {} recreated_before_explicit_rename new_id={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("RENAME"),
+                                        remote_id
                                     );
 
                                     // Newly created playlist already has the desired
@@ -793,9 +916,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                 }
                                 Err(err) => {
                                     log::error!(
-                                        "Failed to recreate missing playlist {} for provider {} during explicit rename: {}",
-                                        playlist_name,
-                                        provider.name(),
+                                        "{} {} {} recreate_before_explicit_rename_failed error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("RENAME"),
                                         err
                                     );
                                     break;
@@ -804,10 +928,24 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         }
 
                         if attempt >= cfg.max_retries_on_error {
-                            log::error!("Rename failed after {} attempts: {}", attempt, e);
+                            log::error!(
+                                "{} {} {} explicit_rename_failed attempts={} error={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
+                                attempt,
+                                e
+                            );
                             break;
                         } else {
-                            log::warn!("Rename attempt {} failed: {}. Retrying...", attempt, e);
+                            log::warn!(
+                                "{} {} {} explicit_rename_retry attempt={} error={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
+                                attempt,
+                                e
+                            );
                             tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                             continue;
                         }
@@ -838,9 +976,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                     if !to_add.is_empty() {
                         log::info!(
-                            "Reconcile: playlist {} on provider {} is missing {} tracks; scheduling adds",
-                            playlist_name,
-                            provider.name(),
+                            "{} {} {} reconcile_missing_tracks scheduling_adds={} ",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RECONCILE"),
                             to_add.len()
                         );
                         add_uris.extend(to_add);
@@ -848,9 +987,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                     if !to_remove.is_empty() {
                         log::info!(
-                            "Reconcile: playlist {} on provider {} has {} extra remote tracks; scheduling removes",
-                            playlist_name,
-                            provider.name(),
+                            "{} {} {} reconcile_extra_tracks scheduling_removes={} ",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RECONCILE"),
                             to_remove.len()
                         );
                         remove_uris.extend(to_remove);
@@ -858,9 +998,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 }
                 Err(e) => {
                     log::warn!(
-                        "Reconcile: failed to list remote tracks for playlist {} on provider {}: {}",
-                        playlist_name,
-                        provider.name(),
+                        "{} {} {} reconcile_list_remote_failed error={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("RECONCILE"),
                         e
                     );
                 }
@@ -868,6 +1009,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         }
 
         // Resolve track URIs and build add/remove lists (prefer cache/ISRC when possible, then fallback to metadata search)
+        log::info!(
+            "{} {} {} resolve_uris_start ops={}",
+            log_run_tag(&worker_id),
+            pl_tag,
+            log_phase_tag("RESOLVE"),
+            track_ops.len()
+        );
+
         for (act, track_path_opt) in track_ops.into_iter() {
             if let Some(tp) = track_path_opt {
                 if tp.starts_with("uri::") {
@@ -910,7 +1059,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     let extracted = match tokio::task::spawn_blocking(move || crate::util::extract_isrc_from_path(&p)).await {
                         Ok(v) => v,
                         Err(e) => {
-                            log::warn!("ISRC extraction task failed for {}: {}", tp, e);
+                            log::warn!(
+                                "{} {} {} isrc_extract_task_failed track={} error={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RESOLVE"),
+                                tp,
+                                e
+                            );
                             None
                         }
                     };
@@ -957,7 +1113,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             // fall through to metadata-based search
                         }
                         Err(e) => {
-                            log::warn!("Error searching by ISRC for {}: {}", tp, e);
+                            log::warn!(
+                                "{} {} {} isrc_search_failed track={} error={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RESOLVE"),
+                                tp,
+                                e
+                            );
                             // fall through to metadata-based search
                         }
                     }
@@ -1008,7 +1171,16 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             // try next candidate ordering
                         }
                     } else if let Err(e) = provider.search_track_uri(title, artist).await {
-                        log::warn!("Error searching track {} with artist='{}' title='{}': {}", tp, artist, title, e);
+                        log::warn!(
+                            "{} {} {} metadata_search_failed track={} artist={} title={} error={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RESOLVE"),
+                            tp,
+                            artist,
+                            title,
+                            e
+                        );
                     }
                 }
 
@@ -1032,7 +1204,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         })
                         .await??;
                 } else {
-                    log::warn!("Could not resolve track {} to remote URI", tp);
+                    log::warn!(
+                        "{} {} {} track_unresolved track={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("RESOLVE"),
+                        tp
+                    );
                 }
             }
         }
@@ -1049,6 +1227,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             uris: Vec<String>,
             is_add: bool,
             cfg: &Config,
+            worker_id: &str,
         ) -> Result<()> {
             if uris.is_empty() {
                 return Ok(());
@@ -1065,7 +1244,15 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         };
                         match res {
                             Ok(_) => {
-                                log::info!("Applied {} {} tracks to {}", if is_add { "add" } else { "remove" }, chunk.len(), playlist_id);
+                                let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                log::info!(
+                                    "{} {} {} batch_applied size={} id={}",
+                                    log_run_tag(worker_id),
+                                    log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                    log_phase_tag(phase),
+                                    chunk.len(),
+                                    playlist_id
+                                );
                                 break;
                             }
                             Err(e) => {
@@ -1090,11 +1277,27 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         let exp = 2u64.saturating_pow(std::cmp::min(attempt, 6));
                                         std::cmp::min(exp, 60)
                                     });
-                                    log::warn!("Rate limited: {}. Sleeping {}s before retry.", e, wait);
+                                    let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                    log::warn!(
+                                        "{} {} {} rate_limited wait_s={} error={}",
+                                        log_run_tag(worker_id),
+                                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                        log_phase_tag(phase),
+                                        wait,
+                                        e
+                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(wait + 1)).await;
                                     // continue retrying until max_retries_on_error
                                     if attempt >= cfg.max_retries_on_error {
-                                        log::error!("Giving up after {} rate-limit attempts: {}", attempt, e);
+                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                        log::error!(
+                                            "{} {} {} rate_limit_give_up attempts={} error={}",
+                                            log_run_tag(worker_id),
+                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_phase_tag(phase),
+                                            attempt,
+                                            e
+                                        );
                                         break;
                                     }
                                     continue;
@@ -1103,11 +1306,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     // playlist id no longer exists, recreate it and retry
                                     // this batch once with the new id.
                                     if s.contains("tidal add tracks failed: 404 Not Found") && s.contains("Playlists with id") {
+                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                         log::warn!(
-                                            "Remote playlist {} (id {}) not found on provider {}; recreating...",
-                                            playlist_name,
-                                            playlist_id,
-                                            provider.name()
+                                            "{} {} {} playlist_missing_for_batch id={}",
+                                            log_run_tag(worker_id),
+                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_phase_tag(phase),
+                                            playlist_id
                                         );
 
                                         // Recreate the playlist via ensure_playlist using the
@@ -1126,11 +1331,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                                 .await??;
 
                                                 *playlist_id = new_id;
+                                                let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                                 log::info!(
-                                                    "Recreated remote playlist {} with new id {} for provider {}",
-                                                    playlist_name,
-                                                    playlist_id,
-                                                    provider.name()
+                                                    "{} {} {} playlist_recreated_for_batch new_id={}",
+                                                    log_run_tag(worker_id),
+                                                    log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                                    log_phase_tag(phase),
+                                                    playlist_id
                                                 );
 
                                                 // Reset attempts and retry the current chunk with
@@ -1139,10 +1346,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                                 continue;
                                             }
                                             Err(err) => {
+                                                let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                                 log::error!(
-                                                    "Failed to recreate missing playlist {} for provider {}: {}",
-                                                    playlist_name,
-                                                    provider.name(),
+                                                    "{} {} {} playlist_recreate_for_batch_failed error={}",
+                                                    log_run_tag(worker_id),
+                                                    log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                                    log_phase_tag(phase),
                                                     err
                                                 );
                                                 return Err(err);
@@ -1150,11 +1359,28 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         }
                                     }
                                     if attempt >= cfg.max_retries_on_error {
-                                        log::error!("Giving up after {} attempts: {}", attempt, e);
+                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                        log::error!(
+                                            "{} {} {} batch_give_up attempts={} error={}",
+                                            log_run_tag(worker_id),
+                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_phase_tag(phase),
+                                            attempt,
+                                            e
+                                        );
                                         break;
                                     } else {
                                         let exp = std::cmp::min(1u64 << attempt, 60);
-                                        log::warn!("Error applying batch (attempt {}): {}. Retrying in {}s...", attempt, e, exp);
+                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                        log::warn!(
+                                            "{} {} {} batch_retry attempt={} error={} backoff_s={}",
+                                            log_run_tag(worker_id),
+                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_phase_tag(phase),
+                                            attempt,
+                                            e,
+                                            exp
+                                        );
                                         tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
                                         continue;
                                     }
@@ -1167,11 +1393,23 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         }
 
         let provider_arc = provider.clone();
-        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, remove_uris, false, cfg).await {
-                log::error!("Error applying removes for {}: {}", playlist_name, e);
+        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, remove_uris, false, cfg, &worker_id).await {
+            log::error!(
+                "{} {} {} apply_removes_failed error={}",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("BATCH_REM"),
+                e
+            );
         }
-        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, add_uris, true, cfg).await {
-                log::error!("Error applying adds for {}: {}", playlist_name, e);
+        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, add_uris, true, cfg, &worker_id).await {
+            log::error!(
+                "{} {} {} apply_adds_failed error={}",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("BATCH_ADD"),
+                e
+            );
         }
 
         // Mark original events as synced (blocking)
@@ -1194,6 +1432,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             Ok(())
         })
         .await?;
+
+        log::info!(
+            "{} {} {} playlist_processed events_synced={}",
+            log_run_tag(&worker_id),
+            pl_tag,
+            log_phase_tag("FINALIZE"),
+            original_ids.len()
+        );
         }
     }
     Ok(())

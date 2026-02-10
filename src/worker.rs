@@ -11,7 +11,8 @@ use uuid::Uuid;
 const PHASE_WIDTH: usize = 10;
 
 fn log_run_tag(run_id: &str) -> String {
-    format!("[RUN:{run}]", run = run_id)
+    let short = &run_id[..std::cmp::min(8, run_id.len())];
+    format!("[RUN:{run}]", run = short)
 }
 
 fn log_playlist_tag(playlist: &str, provider: &str) -> String {

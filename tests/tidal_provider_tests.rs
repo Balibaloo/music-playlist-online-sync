@@ -14,7 +14,9 @@ fn tidal_ensure_playlist_happy_path() {
     env::set_var("TIDAL_API_BASE", &base);
     env::set_var("TIDAL_AUTH_BASE", &base);
 
-    let _m_create = server.mock("POST", "/playlists")
+    // TidalProvider::ensure_playlist calls POST /playlists?countryCode=US, so
+    // the mock must include the query string or mockito will return 501.
+    let _m_create = server.mock("POST", "/playlists?countryCode=US")
         .with_status(201)
         .with_header("content-type", "application/json")
         .with_body(json!({ "id": "tidal_pl_1" }).to_string())
@@ -38,6 +40,9 @@ fn tidal_ensure_playlist_happy_path() {
     let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move { provider.ensure_playlist("Test", "").await });
+    if res.is_err() {
+        println!("tidal ensure_playlist error: {:?}", res);
+    }
     assert!(res.is_ok());
     assert_eq!(res.unwrap(), "tidal_pl_1");
 }

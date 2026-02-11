@@ -18,6 +18,7 @@ impl Provider for TestProvider {
     async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
     async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
     async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+    async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
     async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> { Ok(None) }
     async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> { Ok(None) }
     async fn lookup_track_isrc(&self, _uri: &str) -> anyhow::Result<Option<String>> { Ok(None) }

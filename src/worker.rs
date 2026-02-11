@@ -1216,6 +1216,21 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
         }
 
+        // Deduplicate URIs in add/remove lists before applying batches.
+        // This avoids double-applying the same track when both
+        // reconciliation and event-driven paths schedule an operation
+        // for the same URI in a single run.
+        if !add_uris.is_empty() {
+            use std::collections::HashSet;
+            let mut seen: HashSet<String> = HashSet::new();
+            add_uris.retain(|u| seen.insert(u.clone()));
+        }
+        if !remove_uris.is_empty() {
+            use std::collections::HashSet;
+            let mut seen: HashSet<String> = HashSet::new();
+            remove_uris.retain(|u| seen.insert(u.clone()));
+        }
+
         // Helper to apply batches with retry/backoff and 429 handling.
         // If the remote playlist is reported as missing (e.g. deleted on the
         // provider side), we will recreate it and update the playlist_map,

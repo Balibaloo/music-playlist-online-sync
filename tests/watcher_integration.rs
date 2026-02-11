@@ -32,8 +32,9 @@ local_playlist_template = "${{folder_name}}.m3u"
     fs::write(&cfg_path, cfg_toml).unwrap();
     let cfg = Config::from_path(&cfg_path).expect("load cfg");
 
-    // run watcher (non-blocking due to internal thread spawn)
-    watcher::run_watcher(&cfg).expect("run watcher");
+    // Run only the initial watcher pass (DB + scan + playlist writes)
+    // so the test can complete without blocking on the long-running loop.
+    watcher::run_watcher_initial_pass(&cfg).expect("run watcher initial pass");
 
     // initial playlists should have been written for both folders
     let p_a = root.join("a").join("a.m3u");

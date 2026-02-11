@@ -320,8 +320,10 @@ pub enum SyntheticEvent {
     FolderRemove(PathBuf),
 }
 
-/// Start the watcher; this is the long-running entry point called by the CLI.
-pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
+/// Internal helper: perform the initial DB open, tree build, and playlist
+/// writes. This is used by the long-running watcher as well as tests that
+/// only need to verify the initial playlist generation.
+fn build_initial_tree_and_playlists(cfg: &Config) -> anyhow::Result<InMemoryTree> {
     info!("Starting watcher with root {:?}", cfg.root_folder);
     // Open DB (blocking)
     let _conn = db::open_or_create(&cfg.db_path)
@@ -336,7 +338,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     .with_context(|| format!("building in-memory tree from root {}", cfg.root_folder.display()))?;
     info!("Initial scan complete: {} folders", tree.nodes.len());
 
-    // Initial playlist writes (flat mode)
+    // Initial playlist writes (flat or linked mode)
     for (folder, _node) in tree.nodes.iter() {
         let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).to_path_buf();
@@ -368,6 +370,20 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         }
     }
 
+    Ok(tree)
+}
+
+/// One-shot entry point used by tests: perform the initial playlist writes
+/// and return without starting the long-running watcher loop.
+pub fn run_watcher_initial_pass(cfg: &Config) -> anyhow::Result<()> {
+    let _ = build_initial_tree_and_playlists(cfg)?;
+    Ok(())
+}
+
+/// Start the watcher; this is the long-running entry point called by the CLI.
+pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
+    // Perform initial scan and playlist writes, then keep the watcher running.
+    let tree = build_initial_tree_and_playlists(cfg)?;
     // Shared debounce queue: map playlist folder -> earliest_due Instant
     let debounce_map: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let _debounce_ms = cfg.debounce_ms;

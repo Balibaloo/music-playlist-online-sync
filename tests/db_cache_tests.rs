@@ -1,6 +1,6 @@
-use tempfile::tempdir;
-use rusqlite::Connection;
 use music_file_playlist_online_sync::db;
+use rusqlite::Connection;
+use tempfile::tempdir;
 
 #[test]
 fn playlist_map_and_track_cache_persistence() {
@@ -15,7 +15,14 @@ fn playlist_map_and_track_cache_persistence() {
     assert_eq!(got, Some("rid123".into()));
 
     // test track cache upsert + lookup (scoped by provider; use spotify)
-    db::upsert_track_cache(&conn, "spotify", "/music/a/song.mp3", Some("ISRC123"), Some("rid-trk-1")).unwrap();
+    db::upsert_track_cache(
+        &conn,
+        "spotify",
+        "/music/a/song.mp3",
+        Some("ISRC123"),
+        Some("rid-trk-1"),
+    )
+    .unwrap();
     let cached = db::get_track_cache_by_local(&conn, "spotify", "/music/a/song.mp3").unwrap();
     assert!(cached.is_some());
     let (isrc, rid) = cached.unwrap();

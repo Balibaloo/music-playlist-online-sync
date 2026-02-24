@@ -1,8 +1,8 @@
-use tempfile::tempdir;
 use std::fs::{self, File};
 use std::io::Write;
+use tempfile::tempdir;
 
-use music_file_playlist_online_sync::watcher::{InMemoryTree, SyntheticEvent, LogicalOp};
+use music_file_playlist_online_sync::watcher::{InMemoryTree, LogicalOp, SyntheticEvent};
 
 #[test]
 fn in_memory_tree_applies_synthetic_events() {
@@ -25,7 +25,12 @@ fn in_memory_tree_applies_synthetic_events() {
     let ops = tree.apply_synthetic_event(SyntheticEvent::FileCreate(new_track.clone()));
     assert!(matches!(ops.get(0).unwrap(), LogicalOp::Add { .. }));
     // node should now contain the new track
-    assert!(tree.nodes.get(&root.join("b")).unwrap().tracks.contains(&new_track));
+    assert!(tree
+        .nodes
+        .get(&root.join("b"))
+        .unwrap()
+        .tracks
+        .contains(&new_track));
 
     // apply remove
     let ops = tree.apply_synthetic_event(SyntheticEvent::FileRemove(new_track.clone()));
@@ -34,7 +39,10 @@ fn in_memory_tree_applies_synthetic_events() {
     // rename between folders
     let from = track_a.clone();
     let to = root.join("b").join("song1_renamed.mp3");
-    let ops = tree.apply_synthetic_event(SyntheticEvent::FileRename { from: from.clone(), to: to.clone() });
+    let ops = tree.apply_synthetic_event(SyntheticEvent::FileRename {
+        from: from.clone(),
+        to: to.clone(),
+    });
     // expect remove + add
     assert!(matches!(ops.get(0).unwrap(), LogicalOp::Remove { .. }));
     assert!(matches!(ops.get(1).unwrap(), LogicalOp::Add { .. }));

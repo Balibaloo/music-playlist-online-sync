@@ -1,7 +1,7 @@
 // Minimal PKCE helper for S256 challenge
+use base64::{engine::general_purpose, Engine as _};
 use rand::{distributions::Alphanumeric, Rng};
 use sha2::{Digest, Sha256};
-use base64::{engine::general_purpose, Engine as _};
 
 pub fn generate_code_verifier() -> String {
     rand::thread_rng()

@@ -1,8 +1,8 @@
-use std::path::PathBuf;
 use music_file_playlist_online_sync::config::Config;
-use music_file_playlist_online_sync::worker::run_worker_once;
-use tempfile::NamedTempFile;
 use music_file_playlist_online_sync::db;
+use music_file_playlist_online_sync::worker::run_worker_once;
+use std::path::PathBuf;
+use tempfile::NamedTempFile;
 
 #[tokio::test]
 async fn test_worker_no_credentials() {

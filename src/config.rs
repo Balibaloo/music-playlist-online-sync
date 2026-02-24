@@ -96,34 +96,55 @@ pub struct Config {
     pub online_folder_flattening_delimiter: String,
 }
 
-fn default_local_template() -> String { "${folder_name}.m3u".into() }
-fn default_remote_template() -> String { "${relative_path}".into() }
-fn default_playlist_order_mode() -> String { "append".into() }
-fn default_playlist_mode() -> String { "flat".into() }
-fn default_linked_reference_format() -> String { "relative".into() }
-fn default_debounce() -> u64 { 250 }
-fn default_log_dir() -> PathBuf { "/var/log/music-sync".into() }
-fn default_token_refresh_interval() -> u64 { 3600 }
-fn default_worker_interval() -> u64 { 300 }
-fn default_nightly_cron() -> String { "0 3 * * *".into() }
-fn default_max_retries() -> u32 { 3 }
-fn default_max_batch_spotify() -> usize { 100 }
-fn default_db_path() -> PathBuf { "/var/lib/music-sync/music-sync.db".into() }
+fn default_local_template() -> String {
+    "${folder_name}.m3u".into()
+}
+fn default_remote_template() -> String {
+    "${relative_path}".into()
+}
+fn default_playlist_order_mode() -> String {
+    "append".into()
+}
+fn default_playlist_mode() -> String {
+    "flat".into()
+}
+fn default_linked_reference_format() -> String {
+    "relative".into()
+}
+fn default_debounce() -> u64 {
+    250
+}
+fn default_log_dir() -> PathBuf {
+    "/var/log/music-sync".into()
+}
+fn default_token_refresh_interval() -> u64 {
+    3600
+}
+fn default_worker_interval() -> u64 {
+    300
+}
+fn default_nightly_cron() -> String {
+    "0 3 * * *".into()
+}
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_max_batch_spotify() -> usize {
+    100
+}
+fn default_db_path() -> PathBuf {
+    "/var/lib/music-sync/music-sync.db".into()
+}
 
-fn default_online_playlist_structure() -> String { "flat".into() }
+fn default_online_playlist_structure() -> String {
+    "flat".into()
+}
 
 fn default_file_extensions() -> Vec<String> {
-    vec![
-        "*.mp3",
-        "*.flac",
-        "*.ogg",
-        "*.wav",
-        "*.mp4",
-        "*.m4a",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    vec!["*.mp3", "*.flac", "*.ogg", "*.wav", "*.mp4", "*.m4a"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 impl Config {

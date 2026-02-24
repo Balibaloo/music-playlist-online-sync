@@ -1,11 +1,11 @@
 use mockito::Server;
-use std::env;
-use tempfile::tempdir;
-use rusqlite::Connection;
-use serde_json::json;
 use music_file_playlist_online_sync::api::spotify::SpotifyProvider;
 use music_file_playlist_online_sync::api::Provider;
 use music_file_playlist_online_sync::db;
+use rusqlite::Connection;
+use serde_json::json;
+use std::env;
+use tempfile::tempdir;
 
 #[test]
 fn spotify_refresh_failure_returns_error() {
@@ -15,13 +15,15 @@ fn spotify_refresh_failure_returns_error() {
     env::set_var("SPOTIFY_AUTH_BASE", &base);
     env::set_var("SPOTIFY_API_BASE", &base);
 
-    let _m_me = server.mock("GET", "/me")
+    let _m_me = server
+        .mock("GET", "/me")
         .with_status(401)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"unauthorized"}"#)
         .create();
 
-    let _m_token = server.mock("POST", "/api/token")
+    let _m_token = server
+        .mock("POST", "/api/token")
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"server"}"#)
@@ -41,14 +43,16 @@ fn spotify_refresh_failure_returns_error() {
         "expires_at": now - 1000,
         "refresh_token": "refresh",
         "scope": ""
-    }).to_string();
+    })
+    .to_string();
     db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
     let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let res = rt.block_on(async move {
-        provider.ensure_playlist("X", "").await
-    });
+    let res = rt.block_on(async move { provider.ensure_playlist("X", "").await });
 
-    assert!(res.is_err(), "expected error when token refresh fails via ensure_playlist");
+    assert!(
+        res.is_err(),
+        "expected error when token refresh fails via ensure_playlist"
+    );
 }

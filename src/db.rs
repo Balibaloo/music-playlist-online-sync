@@ -1,8 +1,8 @@
 use crate::models::{Event, EventAction};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
-use chrono::Utc;
 
 pub fn open_or_create(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -55,7 +55,13 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn enqueue_event(conn: &Connection, playlist_name: &str, action: &EventAction, track_path: Option<&str>, extra: Option<&str>) -> Result<()> {
+pub fn enqueue_event(
+    conn: &Connection,
+    playlist_name: &str,
+    action: &EventAction,
+    track_path: Option<&str>,
+    extra: Option<&str>,
+) -> Result<()> {
     let action_str = match action {
         EventAction::Add => "add",
         EventAction::Remove => "remove",
@@ -72,31 +78,45 @@ pub fn enqueue_event(conn: &Connection, playlist_name: &str, action: &EventActio
 }
 
 pub fn fetch_unsynced_events(conn: &Connection) -> Result<Vec<Event>> {
-        let mut stmt = conn.prepare("SELECT id, timestamp, playlist_name, action, track_path, extra, is_synced FROM event_queue WHERE is_synced = 0 ORDER BY timestamp ASC")?;
+    let mut stmt = conn.prepare("SELECT id, timestamp, playlist_name, action, track_path, extra, is_synced FROM event_queue WHERE is_synced = 0 ORDER BY timestamp ASC")?;
     let rows = stmt.query_map([], |r| {
         let action: String = r.get(3)?;
-            let event_action = match action.as_str() {
-                "add" => EventAction::Add,
-                "remove" => EventAction::Remove,
-                "rename" => {
-                    // attempt to parse extra JSON for rename details {"from":"...","to":"..."}
-                    let extra_json: Option<String> = r.get(5).ok();
-                    if let Some(es) = extra_json {
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&es) {
-                            let from = j.get("from").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let to = j.get("to").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            EventAction::Rename { from, to }
-                        } else {
-                            EventAction::Rename { from: "".into(), to: "".into() }
-                        }
+        let event_action = match action.as_str() {
+            "add" => EventAction::Add,
+            "remove" => EventAction::Remove,
+            "rename" => {
+                // attempt to parse extra JSON for rename details {"from":"...","to":"..."}
+                let extra_json: Option<String> = r.get(5).ok();
+                if let Some(es) = extra_json {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&es) {
+                        let from = j
+                            .get("from")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let to = j
+                            .get("to")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        EventAction::Rename { from, to }
                     } else {
-                        EventAction::Rename { from: "".into(), to: "".into() }
+                        EventAction::Rename {
+                            from: "".into(),
+                            to: "".into(),
+                        }
+                    }
+                } else {
+                    EventAction::Rename {
+                        from: "".into(),
+                        to: "".into(),
                     }
                 }
-                "create" => EventAction::Create,
-                "delete" => EventAction::Delete,
-                _ => EventAction::Create,
-            };
+            }
+            "create" => EventAction::Create,
+            "delete" => EventAction::Delete,
+            _ => EventAction::Create,
+        };
         Ok(Event {
             id: r.get(0)?,
             timestamp_ms: r.get(1)?,
@@ -126,7 +146,10 @@ pub fn clear_unsynced_events(conn: &mut Connection) -> Result<usize> {
 pub fn mark_events_synced(conn: &mut Connection, ids: &[i64]) -> Result<()> {
     let tx = conn.transaction()?;
     for id in ids {
-        tx.execute("UPDATE event_queue SET is_synced = 1 WHERE id = ?1", params![id])?;
+        tx.execute(
+            "UPDATE event_queue SET is_synced = 1 WHERE id = ?1",
+            params![id],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -152,11 +175,20 @@ pub fn save_credential_raw(
 /// Load raw credential JSON for a provider
 
 /// Load raw credential JSON and client_id/client_secret for a provider
-pub fn load_credential_with_client(conn: &Connection, provider: &str) -> Result<Option<(String, Option<String>, Option<String>)>> {
-    let mut stmt = conn.prepare("SELECT token_json, client_id, client_secret FROM credentials WHERE provider = ?1 LIMIT 1")?;
+pub fn load_credential_with_client(
+    conn: &Connection,
+    provider: &str,
+) -> Result<Option<(String, Option<String>, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT token_json, client_id, client_secret FROM credentials WHERE provider = ?1 LIMIT 1",
+    )?;
     let row = stmt
         .query_row(params![provider], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })
         .optional()?;
     Ok(row)
@@ -175,15 +207,27 @@ fn playlist_map_key(provider: &str, playlist_name: &str) -> String {
 }
 
 /// Get remote_id for playlist from playlist_map, scoped by provider
-pub fn get_remote_playlist_id(conn: &Connection, provider: &str, playlist_name: &str) -> Result<Option<String>> {
+pub fn get_remote_playlist_id(
+    conn: &Connection,
+    provider: &str,
+    playlist_name: &str,
+) -> Result<Option<String>> {
     let key = playlist_map_key(provider, playlist_name);
-    let mut stmt = conn.prepare("SELECT remote_id FROM playlist_map WHERE playlist_name = ?1 LIMIT 1")?;
-    let row = stmt.query_row(params![key], |r| r.get::<_, Option<String>>(0)).optional()?;
+    let mut stmt =
+        conn.prepare("SELECT remote_id FROM playlist_map WHERE playlist_name = ?1 LIMIT 1")?;
+    let row = stmt
+        .query_row(params![key], |r| r.get::<_, Option<String>>(0))
+        .optional()?;
     Ok(row.flatten())
 }
 
 /// Upsert playlist_map entry with remote_id, scoped by provider
-pub fn upsert_playlist_map(conn: &Connection, provider: &str, playlist_name: &str, remote_id: &str) -> Result<()> {
+pub fn upsert_playlist_map(
+    conn: &Connection,
+    provider: &str,
+    playlist_name: &str,
+    remote_id: &str,
+) -> Result<()> {
     let key = playlist_map_key(provider, playlist_name);
     conn.execute(
         "INSERT INTO playlist_map (playlist_name, remote_id, last_synced_at) VALUES (?1, ?2, strftime('%s','now')) ON CONFLICT(playlist_name) DO UPDATE SET remote_id = excluded.remote_id, last_synced_at = strftime('%s','now')",
@@ -206,7 +250,12 @@ pub fn delete_playlist_map(conn: &Connection, provider: &str, playlist_name: &st
 /// scoped by provider. Keeps the same remote_id but updates the key so that
 /// future events keyed by the new logical name reuse the existing remote
 /// playlist instead of creating a duplicate.
-pub fn migrate_playlist_map(conn: &Connection, provider: &str, from_playlist_name: &str, to_playlist_name: &str) -> Result<()> {
+pub fn migrate_playlist_map(
+    conn: &Connection,
+    provider: &str,
+    from_playlist_name: &str,
+    to_playlist_name: &str,
+) -> Result<()> {
     if let Some(remote_id) = get_remote_playlist_id(conn, provider, from_playlist_name)? {
         // Upsert mapping under the new logical name, then delete the old key.
         upsert_playlist_map(conn, provider, to_playlist_name, &remote_id)?;
@@ -225,15 +274,33 @@ fn track_cache_key(provider: &str, local_path: &str) -> String {
 }
 
 /// Lookup a track cache entry by local path, scoped by provider
-pub fn get_track_cache_by_local(conn: &Connection, provider: &str, local_path: &str) -> Result<Option<(Option<String>, Option<String>)>> {
+pub fn get_track_cache_by_local(
+    conn: &Connection,
+    provider: &str,
+    local_path: &str,
+) -> Result<Option<(Option<String>, Option<String>)>> {
     let key = track_cache_key(provider, local_path);
-    let mut stmt = conn.prepare("SELECT isrc, remote_id FROM track_cache WHERE local_path = ?1 LIMIT 1")?;
-    let row = stmt.query_row(params![key], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))).optional()?;
+    let mut stmt =
+        conn.prepare("SELECT isrc, remote_id FROM track_cache WHERE local_path = ?1 LIMIT 1")?;
+    let row = stmt
+        .query_row(params![key], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .optional()?;
     Ok(row)
 }
 
 /// Upsert track cache entry: (provider, local_path) -> (isrc, remote_id)
-pub fn upsert_track_cache(conn: &Connection, provider: &str, local_path: &str, isrc: Option<&str>, remote_id: Option<&str>) -> Result<()> {
+pub fn upsert_track_cache(
+    conn: &Connection,
+    provider: &str,
+    local_path: &str,
+    isrc: Option<&str>,
+    remote_id: Option<&str>,
+) -> Result<()> {
     let key = track_cache_key(provider, local_path);
     conn.execute(
         "INSERT INTO track_cache (isrc, local_path, remote_id, resolved_at) VALUES (?1, ?2, ?3, strftime('%s','now')) ON CONFLICT(local_path) DO UPDATE SET isrc = excluded.isrc, remote_id = excluded.remote_id, resolved_at = strftime('%s','now')",
@@ -244,18 +311,26 @@ pub fn upsert_track_cache(conn: &Connection, provider: &str, local_path: &str, i
 
 /// Try to acquire a processing lock for a playlist. Returns true if lock acquired.
 /// TTL is seconds for the lease (e.g., 600).
-pub fn try_acquire_playlist_lock(conn: &mut Connection, playlist_name: &str, worker_id: &str, ttl_seconds: i64) -> Result<bool> {
+pub fn try_acquire_playlist_lock(
+    conn: &mut Connection,
+    playlist_name: &str,
+    worker_id: &str,
+    ttl_seconds: i64,
+) -> Result<bool> {
     let now = Utc::now().timestamp();
     let expires_at = now + ttl_seconds;
     let tx = conn.transaction()?;
     // check existing lock
     let row_opt = {
-        let mut stmt = tx.prepare("SELECT worker_id, expires_at FROM processing_locks WHERE playlist_name = ?1 LIMIT 1")?;
+        let mut stmt = tx.prepare(
+            "SELECT worker_id, expires_at FROM processing_locks WHERE playlist_name = ?1 LIMIT 1",
+        )?;
         stmt.query_row(params![playlist_name], |r| {
             let w: String = r.get(0)?;
             let e: i64 = r.get(1)?;
             Ok((w, e))
-        }).optional()?
+        })
+        .optional()?
     };
 
     if let Some((_w, e)) = row_opt {
@@ -278,9 +353,16 @@ pub fn try_acquire_playlist_lock(conn: &mut Connection, playlist_name: &str, wor
 }
 
 /// Release a processing lock (only if owned by this worker_id)
-pub fn release_playlist_lock(conn: &mut Connection, playlist_name: &str, worker_id: &str) -> Result<()> {
+pub fn release_playlist_lock(
+    conn: &mut Connection,
+    playlist_name: &str,
+    worker_id: &str,
+) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM processing_locks WHERE playlist_name = ?1 AND worker_id = ?2", params![playlist_name, worker_id])?;
+    tx.execute(
+        "DELETE FROM processing_locks WHERE playlist_name = ?1 AND worker_id = ?2",
+        params![playlist_name, worker_id],
+    )?;
     tx.commit()?;
     Ok(())
 }

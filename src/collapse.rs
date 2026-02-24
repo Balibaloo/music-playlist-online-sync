@@ -74,10 +74,32 @@ mod tests {
     use crate::models::Event;
     #[test]
     fn collapse_add_remove_pair() {
-        let a = Event { id:1, timestamp_ms:1, playlist_name:"p".into(), action: EventAction::Add, track_path: Some("t.mp3".into()), extra: None, is_synced:false };
-        let r = Event { id:2, timestamp_ms:2, playlist_name:"p".into(), action: EventAction::Remove, track_path: Some("t.mp3".into()), extra: None, is_synced:false };
+        let a = Event {
+            id: 1,
+            timestamp_ms: 1,
+            playlist_name: "p".into(),
+            action: EventAction::Add,
+            track_path: Some("t.mp3".into()),
+            extra: None,
+            is_synced: false,
+        };
+        let r = Event {
+            id: 2,
+            timestamp_ms: 2,
+            playlist_name: "p".into(),
+            action: EventAction::Remove,
+            track_path: Some("t.mp3".into()),
+            extra: None,
+            is_synced: false,
+        };
         let res = collapse_events(&[a, r]);
-        assert!(res.iter().all(|e| match e.action { EventAction::Add|EventAction::Remove => false, _ => true } ) == false || res.is_empty());
+        assert!(
+            res.iter().all(|e| match e.action {
+                EventAction::Add | EventAction::Remove => false,
+                _ => true,
+            }) == false
+                || res.is_empty()
+        );
         // In our simple impl they cancel out => no track ops included
         // Only ensure no Add/Remove remains for that track
         assert!(res.iter().all(|e| e.track_path.as_deref() != Some("t.mp3")));

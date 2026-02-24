@@ -1,10 +1,10 @@
-use log::{warn, debug};
 use super::Provider;
 use crate::db;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
+use log::{debug, warn};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -81,9 +81,7 @@ impl SpotifyProvider {
                 return Ok(true);
             }
             // 404/403 after refresh -> treat as invalid mapping.
-            if st2 == reqwest::StatusCode::NOT_FOUND
-                || st2 == reqwest::StatusCode::FORBIDDEN
-            {
+            if st2 == reqwest::StatusCode::NOT_FOUND || st2 == reqwest::StatusCode::FORBIDDEN {
                 debug!(
                     "Spotify playlist {} not accessible after refresh (status {}); treating as invalid",
                     playlist_id,
@@ -99,13 +97,10 @@ impl SpotifyProvider {
 
         // 404/403 without needing refresh means the playlist either no
         // longer exists or the user no longer has access to it.
-        if status == reqwest::StatusCode::NOT_FOUND
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
             debug!(
                 "Spotify playlist {} not accessible (status {}); treating as invalid",
-                playlist_id,
-                status
+                playlist_id, status
             );
             return Ok(false);
         }
@@ -132,7 +127,11 @@ impl SpotifyProvider {
             let status = resp.status();
             if !status.is_success() {
                 let txt = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("list playlist tracks failed: {} => {}", status, txt));
+                return Err(anyhow!(
+                    "list playlist tracks failed: {} => {}",
+                    status,
+                    txt
+                ));
             }
             let j: serde_json::Value = resp.json().await?;
             if let Some(items) = j["items"].as_array() {
@@ -150,14 +149,23 @@ impl SpotifyProvider {
         uris.retain(|u| seen.insert(u.clone()));
         Ok(uris)
     }
-        /// List all playlists for the authenticated user
-        pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
+    /// List all playlists for the authenticated user
+    pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
         let user_id = self.get_user_id().await?;
         let bearer = self.get_bearer().await?;
         let mut playlists = Vec::new();
-        let mut next_url = Some(format!("{}/users/{}/playlists?limit=50", Self::api_base(), url::form_urlencoded::byte_serialize(user_id.as_bytes()).collect::<String>()));
+        let mut next_url = Some(format!(
+            "{}/users/{}/playlists?limit=50",
+            Self::api_base(),
+            url::form_urlencoded::byte_serialize(user_id.as_bytes()).collect::<String>()
+        ));
         while let Some(url) = next_url {
-            let resp = self.client.get(&url).header(AUTHORIZATION, &bearer).send().await?;
+            let resp = self
+                .client
+                .get(&url)
+                .header(AUTHORIZATION, &bearer)
+                .send()
+                .await?;
             let status = resp.status();
             if !status.is_success() {
                 let txt = resp.text().await.unwrap_or_default();
@@ -179,7 +187,9 @@ impl SpotifyProvider {
         // If either client_id or client_secret is empty, try to load from DB
         let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {
             if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                if let Ok(Some((_token_json, db_client_id, db_client_secret))) = crate::db::load_credential_with_client(&conn, "spotify") {
+                if let Ok(Some((_token_json, db_client_id, db_client_secret))) =
+                    crate::db::load_credential_with_client(&conn, "spotify")
+                {
                     (
                         db_client_id.unwrap_or(client_id),
                         db_client_secret.unwrap_or(client_secret),
@@ -219,14 +229,17 @@ impl SpotifyProvider {
 
     async fn load_token_from_db(&self) -> Result<Option<StoredToken>> {
         let db_path = self.db_path.clone();
-        let json_opt = tokio::task::spawn_blocking(move || -> Result<Option<String>, anyhow::Error> {
-            let conn = rusqlite::Connection::open(db_path)?;
-            Ok(crate::db::load_credential_with_client(&conn, "spotify")?.map(|(json, _, _)| json))
-        })
-        .await??;
+        let json_opt =
+            tokio::task::spawn_blocking(move || -> Result<Option<String>, anyhow::Error> {
+                let conn = rusqlite::Connection::open(db_path)?;
+                Ok(crate::db::load_credential_with_client(&conn, "spotify")?
+                    .map(|(json, _, _)| json))
+            })
+            .await??;
 
         if let Some(s) = json_opt {
-            let st: StoredToken = serde_json::from_str(&s).map_err(|e| anyhow!("parse token json: {}", e))?;
+            let st: StoredToken =
+                serde_json::from_str(&s).map_err(|e| anyhow!("parse token json: {}", e))?;
             Ok(Some(st))
         } else {
             Ok(None)
@@ -266,14 +279,21 @@ impl SpotifyProvider {
     }
 
     async fn refresh_token_internal(&self, cur: &mut StoredToken) -> Result<()> {
-        let refresh_token = cur.refresh_token.clone().ok_or_else(|| anyhow!("no refresh token"))?;
+        let refresh_token = cur
+            .refresh_token
+            .clone()
+            .ok_or_else(|| anyhow!("no refresh token"))?;
         let params = [
             ("grant_type", "refresh_token"),
             ("refresh_token", &refresh_token),
         ];
-        let auth_header = format!("Basic {}", general_purpose::STANDARD.encode(format!("{}:{}", self.client_id, self.client_secret)));
+        let auth_header = format!(
+            "Basic {}",
+            general_purpose::STANDARD.encode(format!("{}:{}", self.client_id, self.client_secret))
+        );
         let url = format!("{}/api/token", Self::auth_base());
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header(AUTHORIZATION, auth_header)
             .form(&params)
@@ -285,13 +305,18 @@ impl SpotifyProvider {
             return Err(anyhow!("Failed to refresh token: {} - {}", status, body));
         }
         let j: serde_json::Value = resp.json().await?;
-        let access_token = j["access_token"].as_str().ok_or_else(|| anyhow!("no access_token"))?.to_string();
+        let access_token = j["access_token"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no access_token"))?
+            .to_string();
         let expires_in = j["expires_in"].as_i64().unwrap_or(3600);
         let scope = j["scope"].as_str().map(|s| s.to_string());
         cur.access_token = access_token;
         cur.token_type = "Bearer".into();
         cur.expires_at = Utc::now().timestamp() + expires_in;
-        if let Some(s) = scope { cur.scope = Some(s); }
+        if let Some(s) = scope {
+            cur.scope = Some(s);
+        }
         self.persist_token_to_db(cur).await?;
         Ok(())
     }
@@ -312,17 +337,30 @@ impl SpotifyProvider {
         }
         let bearer = self.get_bearer().await?;
         let url = format!("{}/me", Self::api_base());
-        let resp = self.client.get(&url).header(AUTHORIZATION, &bearer).send().await?;
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             warn!("Got 401 when fetching /me; attempting token refresh");
             self.ensure_token().await?;
             let bearer2 = self.get_bearer().await?;
-            let resp2 = self.client.get(&url).header(AUTHORIZATION, &bearer2).send().await?;
+            let resp2 = self
+                .client
+                .get(&url)
+                .header(AUTHORIZATION, &bearer2)
+                .send()
+                .await?;
             if !resp2.status().is_success() {
                 return Err(anyhow!("failed to fetch /me: {}", resp2.status()));
             }
             let j: serde_json::Value = resp2.json().await?;
-            let id = j["id"].as_str().ok_or_else(|| anyhow!("no id"))?.to_string();
+            let id = j["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no id"))?
+                .to_string();
             let mut g = self.user_id.lock().await;
             *g = Some(id.clone());
             return Ok(id);
@@ -331,7 +369,10 @@ impl SpotifyProvider {
             return Err(anyhow!("failed to fetch /me: {}", resp.status()));
         }
         let j: serde_json::Value = resp.json().await?;
-        let id = j["id"].as_str().ok_or_else(|| anyhow!("no id"))?.to_string();
+        let id = j["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no id"))?
+            .to_string();
         let mut g = self.user_id.lock().await;
         *g = Some(id.clone());
         Ok(id)
@@ -349,7 +390,11 @@ impl Provider for SpotifyProvider {
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
         let user_id = self.get_user_id().await?;
         let bearer = self.get_bearer().await?;
-        let url = format!("{}/users/{}/playlists", Self::api_base(), url::form_urlencoded::byte_serialize(user_id.as_bytes()).collect::<String>());
+        let url = format!(
+            "{}/users/{}/playlists",
+            Self::api_base(),
+            url::form_urlencoded::byte_serialize(user_id.as_bytes()).collect::<String>()
+        );
         let body = json!({
             "name": name,
             "description": description,
@@ -378,7 +423,10 @@ impl Provider for SpotifyProvider {
                 return Err(anyhow!("create playlist failed: {}", resp2.status()));
             }
             let j: serde_json::Value = resp2.json().await?;
-            let id = j["id"].as_str().ok_or_else(|| anyhow!("no id"))?.to_string();
+            let id = j["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no id"))?
+                .to_string();
             return Ok(id);
         }
         let status = resp.status();
@@ -387,7 +435,10 @@ impl Provider for SpotifyProvider {
             return Err(anyhow!("create playlist failed: {} => {}", status, txt));
         }
         let j: serde_json::Value = resp.json().await?;
-        let id = j["id"].as_str().ok_or_else(|| anyhow!("no id"))?.to_string();
+        let id = j["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no id"))?
+            .to_string();
         Ok(id)
     }
 
@@ -435,18 +486,34 @@ impl Provider for SpotifyProvider {
         let bearer = self.get_bearer().await?;
         let url = format!("{}/playlists/{}/tracks", Self::api_base(), playlist_id);
         let body = json!({ "uris": uris });
-        let resp = self.client.post(&url).header(AUTHORIZATION, &bearer).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .header(AUTHORIZATION, &bearer)
+            .json(&body)
+            .send()
+            .await?;
         if resp.status().as_u16() == 401 {
             self.ensure_token().await?;
             let bearer2 = self.get_bearer().await?;
-            let resp2 = self.client.post(&url).header(AUTHORIZATION, &bearer2).json(&body).send().await?;
+            let resp2 = self
+                .client
+                .post(&url)
+                .header(AUTHORIZATION, &bearer2)
+                .json(&body)
+                .send()
+                .await?;
             if !resp2.status().is_success() {
                 return Err(anyhow!("add tracks failed: {}", resp2.status()));
             }
             return Ok(());
         }
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok());
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
         }
         let status = resp.status();
@@ -462,18 +529,34 @@ impl Provider for SpotifyProvider {
         let url = format!("{}/playlists/{}/tracks", Self::api_base(), playlist_id);
         let tracks: Vec<serde_json::Value> = uris.iter().map(|u| json!({ "uri": u })).collect();
         let body = json!({ "tracks": tracks });
-        let resp = self.client.delete(&url).header(AUTHORIZATION, &bearer).json(&body).send().await?;
+        let resp = self
+            .client
+            .delete(&url)
+            .header(AUTHORIZATION, &bearer)
+            .json(&body)
+            .send()
+            .await?;
         if resp.status().as_u16() == 401 {
             self.ensure_token().await?;
             let bearer2 = self.get_bearer().await?;
-            let resp2 = self.client.delete(&url).header(AUTHORIZATION, &bearer2).json(&body).send().await?;
+            let resp2 = self
+                .client
+                .delete(&url)
+                .header(AUTHORIZATION, &bearer2)
+                .json(&body)
+                .send()
+                .await?;
             if !resp2.status().is_success() {
                 return Err(anyhow!("remove tracks failed: {}", resp2.status()));
             }
             return Ok(());
         }
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok());
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
         }
         let status = resp.status();
@@ -491,11 +574,21 @@ impl Provider for SpotifyProvider {
         // DELETE /playlists/{playlist_id}/followers
         let bearer = self.get_bearer().await?;
         let url = format!("{}/playlists/{}/followers", Self::api_base(), playlist_id);
-        let resp = self.client.delete(&url).header(AUTHORIZATION, &bearer).send().await?;
+        let resp = self
+            .client
+            .delete(&url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await?;
         if resp.status().as_u16() == 401 {
             self.ensure_token().await?;
             let bearer2 = self.get_bearer().await?;
-            let resp2 = self.client.delete(&url).header(AUTHORIZATION, &bearer2).send().await?;
+            let resp2 = self
+                .client
+                .delete(&url)
+                .header(AUTHORIZATION, &bearer2)
+                .send()
+                .await?;
             if !resp2.status().is_success() {
                 return Err(anyhow!("delete playlist failed: {}", resp2.status()));
             }
@@ -517,8 +610,18 @@ impl Provider for SpotifyProvider {
 
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>> {
         let q = format!("track:{} artist:{}", title, artist);
-        let url = format!("{}/search?q={}&type=track&limit=1", Self::api_base(), urlencoding::encode(&q));
-        let resp = self.client.get(&url).header(AUTHORIZATION, &self.get_bearer().await?).header(ACCEPT, "application/json").send().await?;
+        let url = format!(
+            "{}/search?q={}&type=track&limit=1",
+            Self::api_base(),
+            urlencoding::encode(&q)
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, &self.get_bearer().await?)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await?;
         if !resp.status().is_success() {
             return Ok(None);
         }
@@ -533,7 +636,11 @@ impl Provider for SpotifyProvider {
 
     async fn search_track_uri_by_isrc(&self, isrc: &str) -> Result<Option<String>> {
         let q = format!("isrc:{}", isrc);
-        let url = format!("{}/search?q={}&type=track&limit=1", Self::api_base(), urlencoding::encode(&q));
+        let url = format!(
+            "{}/search?q={}&type=track&limit=1",
+            Self::api_base(),
+            urlencoding::encode(&q)
+        );
         let resp = self
             .client
             .get(&url)
@@ -561,15 +668,26 @@ impl Provider for SpotifyProvider {
             // try to parse last path segment
             uri.rsplit('/').next().unwrap_or("").to_string()
         };
-        if id.is_empty() { return Ok(None); }
+        if id.is_empty() {
+            return Ok(None);
+        }
         let url = format!("{}/tracks/{}", Self::api_base(), id);
         let bearer = self.get_bearer().await?;
-        let resp = self.client.get(&url).header(AUTHORIZATION, &bearer).send().await?;
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, &bearer)
+            .send()
+            .await?;
         if !resp.status().is_success() {
             return Ok(None);
         }
         let j: serde_json::Value = resp.json().await?;
-        if let Some(isrc) = j.get("external_ids").and_then(|e| e.get("isrc")).and_then(|v| v.as_str()) {
+        if let Some(isrc) = j
+            .get("external_ids")
+            .and_then(|e| e.get("isrc"))
+            .and_then(|v| v.as_str())
+        {
             return Ok(Some(isrc.to_string()));
         }
         Ok(None)

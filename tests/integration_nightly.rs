@@ -40,9 +40,13 @@ fn nightly_reconcile_enqueues_events() -> Result<(), Box<dyn std::error::Error>>
     // run reconcile
     music_file_playlist_online_sync::worker::run_nightly_reconcile(&cfg)?;
     // verify DB has queued events (ensure migrations applied)
-    let conn = music_file_playlist_online_sync::db::open_or_create(std::path::Path::new(&cfg.db_path))?;
+    let conn =
+        music_file_playlist_online_sync::db::open_or_create(std::path::Path::new(&cfg.db_path))?;
     let cnt: i64 = conn.query_row("SELECT COUNT(*) FROM event_queue", [], |r| r.get(0))?;
-    assert!(cnt > 0, "expected event_queue to have entries after reconcile");
+    assert!(
+        cnt > 0,
+        "expected event_queue to have entries after reconcile"
+    );
 
     Ok(())
 }

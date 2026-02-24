@@ -12,7 +12,8 @@ use std::env;
 fn spotify_me_mock_example() {
     // Create mock server outside any tokio runtime
     let mut server = Server::new();
-    let _m = server.mock("GET", "/v1/me")
+    let _m = server
+        .mock("GET", "/v1/me")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"id":"mock_user"}"#)

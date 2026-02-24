@@ -71,10 +71,7 @@ pub fn write_flat_playlist(
     writeln!(file, "#EXTM3U")?;
 
     for p in files.iter() {
-        let title = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let title = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
         let relpath = pathdiff::diff_paths(p, target_folder).unwrap_or_else(|| p.clone());
 
@@ -86,7 +83,12 @@ pub fn write_flat_playlist(
 }
 
 /// For linked mode, create a playlist that references direct children playlists (not implemented in prototype)
-pub fn write_linked_playlist(target_folder: &Path, playlist_path: &Path, linked_reference_format: &str, local_playlist_template: &str) -> anyhow::Result<()> {
+pub fn write_linked_playlist(
+    target_folder: &Path,
+    playlist_path: &Path,
+    linked_reference_format: &str,
+    local_playlist_template: &str,
+) -> anyhow::Result<()> {
     // write references to immediate child playlists
     let mut file = std::fs::File::create(playlist_path)?;
     let mut children: Vec<std::path::PathBuf> = Vec::new();
@@ -107,13 +109,15 @@ pub fn write_linked_playlist(target_folder: &Path, playlist_path: &Path, linked_
         // is empty and folder_name identifies the child.
         let folder_name = child.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let path_to_parent = String::new();
-        let child_playlist_name = crate::util::expand_template(local_playlist_template, folder_name, &path_to_parent);
+        let child_playlist_name =
+            crate::util::expand_template(local_playlist_template, folder_name, &path_to_parent);
         let child_playlist_path = child.join(child_playlist_name);
         let line = if linked_reference_format == "absolute" {
             child_playlist_path.display().to_string()
         } else {
             // relative
-            let relpath = pathdiff::diff_paths(&child_playlist_path, target_folder).unwrap_or(child_playlist_path.clone());
+            let relpath = pathdiff::diff_paths(&child_playlist_path, target_folder)
+                .unwrap_or(child_playlist_path.clone());
             relpath.display().to_string()
         };
         writeln!(file, "{}", line)?;

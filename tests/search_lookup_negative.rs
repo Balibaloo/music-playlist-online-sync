@@ -1,11 +1,11 @@
 use mockito::Server;
-use std::env;
-use tempfile::tempdir;
-use rusqlite::Connection;
-use serde_json::json;
 use music_file_playlist_online_sync::api::spotify::SpotifyProvider;
 use music_file_playlist_online_sync::api::Provider;
 use music_file_playlist_online_sync::db;
+use rusqlite::Connection;
+use serde_json::json;
+use std::env;
+use tempfile::tempdir;
 
 #[test]
 fn spotify_search_returns_none_on_error() {
@@ -15,7 +15,8 @@ fn spotify_search_returns_none_on_error() {
     env::set_var("SPOTIFY_AUTH_BASE", &base);
 
     // mock search endpoint to return 500
-    let _m_search = server.mock("GET", "/search")
+    let _m_search = server
+        .mock("GET", "/search")
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"server"}"#)
@@ -33,7 +34,8 @@ fn spotify_search_returns_none_on_error() {
         "expires_at": now + 3600,
         "refresh_token": null,
         "scope": ""
-    }).to_string();
+    })
+    .to_string();
     db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
     let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());

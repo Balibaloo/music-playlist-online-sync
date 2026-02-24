@@ -1,15 +1,15 @@
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
-use tracing_subscriber;
-use tracing_subscriber::{fmt, EnvFilter};
-use tracing_subscriber::prelude::*;
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_log::LogTracer;
-use tracing::subscriber as tracing_subscriber_global;
-use anyhow::{Result, Context};
-use music_file_playlist_online_sync as lib;
 use lib::api::Provider;
 use lib::config::Config;
+use music_file_playlist_online_sync as lib;
+use std::path::{Path, PathBuf};
+use tracing::subscriber as tracing_subscriber_global;
+use tracing_appender::rolling::RollingFileAppender;
+use tracing_log::LogTracer;
+use tracing_subscriber;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser)]
 #[command(name = "music-file-playlist-online-sync", version)]
@@ -102,7 +102,8 @@ async fn main() -> Result<()> {
     // Initialize log->tracing bridge and structured logging.
     // Logs go to both stdout and a daily-rotated file in cfg.log_dir.
     let _ = LogTracer::init();
-    let file_appender: RollingFileAppender = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
+    let file_appender: RollingFileAppender =
+        tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Honor RUST_LOG if set, otherwise default to info.
@@ -123,11 +124,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Watcher => {
-            lib::watcher::run_watcher(&cfg)
-                .with_context(|| "running watcher".to_string())?;
+            lib::watcher::run_watcher(&cfg).with_context(|| "running watcher".to_string())?;
         }
         Commands::Worker => {
-            lib::worker::run_worker_once(&cfg).await
+            lib::worker::run_worker_once(&cfg)
+                .await
                 .with_context(|| "running worker".to_string())?;
         }
         Commands::Reconcile => {
@@ -161,8 +162,14 @@ async fn main() -> Result<()> {
             async fn run_auth_test(
                 provider_name: &str,
                 list_playlists: BoxFuture<'static, anyhow::Result<Vec<(String, String)>>>,
-                ensure_playlist: Box<dyn Fn(String, String) -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>,
-                rename_playlist: Box<dyn Fn(String, String) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>,
+                ensure_playlist: Box<
+                    dyn Fn(String, String) -> BoxFuture<'static, anyhow::Result<String>>
+                        + Send
+                        + Sync,
+                >,
+                rename_playlist: Box<
+                    dyn Fn(String, String) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync,
+                >,
             ) -> anyhow::Result<()> {
                 println!("Listing all user playlists:");
                 let playlists = list_playlists.await?;
@@ -171,7 +178,9 @@ async fn main() -> Result<()> {
                 }
 
                 let test_prefix = "Test MFPOS ";
-                let config_path = std::env::var("TEST_DB_PATH").ok().unwrap_or_else(|| "etc/music-sync/config.toml".to_string());
+                let config_path = std::env::var("TEST_DB_PATH")
+                    .ok()
+                    .unwrap_or_else(|| "etc/music-sync/config.toml".to_string());
                 let db_path = if config_path.ends_with(".toml") {
                     match Config::from_path(std::path::Path::new(&config_path)) {
                         Ok(cfg) => cfg.db_path.to_string_lossy().to_string(),
@@ -187,11 +196,12 @@ async fn main() -> Result<()> {
                 for (_id, name) in &playlists {
                     if let Some(rest) = name.strip_prefix(test_prefix) {
                         if let Ok(n) = rest.trim().parse::<u32>() {
-                            if n > max_num { max_num = n; }
+                            if n > max_num {
+                                max_num = n;
+                            }
                         }
                     }
                 }
-
 
                 // Scan mapping DB for all mapped Test MFPOS N playlists, find highest N
                 let (mapped_name, mapped_id, mapped_num) = rusqlite::Connection::open(&db_path)
@@ -202,7 +212,13 @@ async fn main() -> Result<()> {
                         let mut best_id = String::new();
                         for n in 1..=max_num.max(1) {
                             let name = format!("{}{}", test_prefix, n);
-                            if let Ok(Some(id)) = music_file_playlist_online_sync::db::get_remote_playlist_id(&conn, provider_name, &name) {
+                            if let Ok(Some(id)) =
+                                music_file_playlist_online_sync::db::get_remote_playlist_id(
+                                    &conn,
+                                    provider_name,
+                                    &name,
+                                )
+                            {
                                 if n > highest_n {
                                     highest_n = n;
                                     best_name = name;
@@ -226,7 +242,12 @@ async fn main() -> Result<()> {
                     match rename_playlist(mapped_id.clone(), new_name.clone()).await {
                         Ok(()) => {
                             if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                                let _ = music_file_playlist_online_sync::db::upsert_playlist_map(&conn, provider_name, &new_name, &mapped_id);
+                                let _ = music_file_playlist_online_sync::db::upsert_playlist_map(
+                                    &conn,
+                                    provider_name,
+                                    &new_name,
+                                    &mapped_id,
+                                );
                                 println!("[DEBUG] Mapping updated in DB.");
                             }
                             println!("{} auth test complete.", provider_name);
@@ -246,7 +267,12 @@ async fn main() -> Result<()> {
                 let pid = ensure_playlist(test_name.clone(), desc).await?;
                 println!("Created playlist with id: {}", pid);
                 if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                    let _ = music_file_playlist_online_sync::db::upsert_playlist_map(&conn, provider_name, &test_name, &pid);
+                    let _ = music_file_playlist_online_sync::db::upsert_playlist_map(
+                        &conn,
+                        provider_name,
+                        &test_name,
+                        &pid,
+                    );
                     println!("[DEBUG] Mapping created in DB.");
                 }
                 println!("{} auth test complete.", provider_name);
@@ -258,7 +284,8 @@ async fn main() -> Result<()> {
                     use lib::api::spotify::SpotifyProvider;
                     let db_path = cfg.db_path.clone();
                     // Pass empty strings to load from DB
-                    let spotify = Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
+                    let spotify =
+                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
                     let list_playlists = {
                         let spotify = spotify.clone();
                         Box::pin(async move { spotify.list_user_playlists().await })
@@ -267,17 +294,20 @@ async fn main() -> Result<()> {
                         let spotify = spotify.clone();
                         Box::new(move |n: String, d: String| {
                             let spotify = spotify.clone();
-                            Box::pin(async move { spotify.ensure_playlist(&n, &d).await }) as BoxFuture<'static, anyhow::Result<String>>
+                            Box::pin(async move { spotify.ensure_playlist(&n, &d).await })
+                                as BoxFuture<'static, anyhow::Result<String>>
                         })
                     };
                     let rename_playlist = {
                         let spotify = spotify.clone();
                         Box::new(move |id: String, n: String| {
                             let spotify = spotify.clone();
-                            Box::pin(async move { spotify.rename_playlist(&id, &n).await }) as BoxFuture<'static, anyhow::Result<()>>
+                            Box::pin(async move { spotify.rename_playlist(&id, &n).await })
+                                as BoxFuture<'static, anyhow::Result<()>>
                         })
                     };
-                    run_auth_test("Spotify", list_playlists, ensure_playlist, rename_playlist).await?;
+                    run_auth_test("Spotify", list_playlists, ensure_playlist, rename_playlist)
+                        .await?;
                 }
                 AuthTestCommands::Tidal => {
                     use lib::api::tidal::TidalProvider;
@@ -301,7 +331,9 @@ async fn main() -> Result<()> {
                     println!("Testing Tidal token refresh...");
                     match tidal.test_refresh_token().await {
                         Ok(()) => {
-                            println!("Tidal token refresh succeeded. Proceeding with playlist tests.\n");
+                            println!(
+                                "Tidal token refresh succeeded. Proceeding with playlist tests.\n"
+                            );
                         }
                         Err(e) => {
                             eprintln!("Tidal token refresh FAILED: {}", e);
@@ -317,24 +349,28 @@ async fn main() -> Result<()> {
                         let tidal = tidal.clone();
                         Box::new(move |n: String, d: String| {
                             let tidal = tidal.clone();
-                            Box::pin(async move { tidal.ensure_playlist(&n, &d).await }) as BoxFuture<'static, anyhow::Result<String>>
+                            Box::pin(async move { tidal.ensure_playlist(&n, &d).await })
+                                as BoxFuture<'static, anyhow::Result<String>>
                         })
                     };
                     let rename_playlist = {
                         let tidal = tidal.clone();
                         Box::new(move |id: String, n: String| {
                             let tidal = tidal.clone();
-                            Box::pin(async move { tidal.rename_playlist(&id, &n).await }) as BoxFuture<'static, anyhow::Result<()>>
+                            Box::pin(async move { tidal.rename_playlist(&id, &n).await })
+                                as BoxFuture<'static, anyhow::Result<()>>
                         })
                     };
-                    run_auth_test("Tidal", list_playlists, ensure_playlist, rename_playlist).await?;
+                    run_auth_test("Tidal", list_playlists, ensure_playlist, rename_playlist)
+                        .await?;
                 }
             }
         }
         Commands::QueueStatus => {
             let db_path = cfg.db_path.clone();
             match rusqlite::Connection::open(&db_path) {
-                Ok(conn) => match music_file_playlist_online_sync::db::fetch_unsynced_events(&conn) {
+                Ok(conn) => match music_file_playlist_online_sync::db::fetch_unsynced_events(&conn)
+                {
                     Ok(events) => {
                         println!("Queue contains {} unsynced event(s):", events.len());
                         for event in events {
@@ -364,22 +400,28 @@ async fn main() -> Result<()> {
         Commands::QueueClear => {
             let db_path = cfg.db_path.clone();
             match rusqlite::Connection::open(&db_path) {
-                Ok(mut conn) => match music_file_playlist_online_sync::db::clear_unsynced_events(&mut conn) {
-                    Ok(removed) => {
-                        println!("Cleared {} unsynced event(s) from the queue.", removed);
+                Ok(mut conn) => {
+                    match music_file_playlist_online_sync::db::clear_unsynced_events(&mut conn) {
+                        Ok(removed) => {
+                            println!("Cleared {} unsynced event(s) from the queue.", removed);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to clear queue events: {}", e);
+                            std::process::exit(1);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to clear queue events: {}", e);
-                        std::process::exit(1);
-                    }
-                },
+                }
                 Err(e) => {
                     eprintln!("Failed to open DB: {}", e);
                     std::process::exit(1);
                 }
             }
         }
-        Commands::DeletePlaylists { provider, name_regex, dry_run } => {
+        Commands::DeletePlaylists {
+            provider,
+            name_regex,
+            dry_run,
+        } => {
             use regex::Regex;
             use std::sync::Arc;
 
@@ -398,7 +440,8 @@ async fn main() -> Result<()> {
                     use lib::api::spotify::SpotifyProvider;
 
                     let db_path = cfg.db_path.clone();
-                    let prov = Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
+                    let prov =
+                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
                     if !prov.is_authenticated() {
                         eprintln!("Spotify provider is not authenticated. Run auth first.");
                         std::process::exit(1);
@@ -436,7 +479,10 @@ async fn main() -> Result<()> {
                     for (id, name) in matches.drain(..) {
                         println!("Deleting playlist '{}' ({})...", name, id);
                         if let Err(e) = prov.delete_playlist(&id).await {
-                            eprintln!("Failed to delete Spotify playlist '{}' ({}): {}", name, id, e);
+                            eprintln!(
+                                "Failed to delete Spotify playlist '{}' ({}): {}",
+                                name, id, e
+                            );
                             failed += 1;
                         }
                     }
@@ -460,7 +506,12 @@ async fn main() -> Result<()> {
                     } else {
                         Some(cfg.online_root_playlist.clone())
                     };
-                    let prov = Arc::new(TidalProvider::new(String::new(), String::new(), db_path, root));
+                    let prov = Arc::new(TidalProvider::new(
+                        String::new(),
+                        String::new(),
+                        db_path,
+                        root,
+                    ));
                     if !prov.is_authenticated() {
                         eprintln!("Tidal provider is not authenticated. Run auth first.");
                         std::process::exit(1);

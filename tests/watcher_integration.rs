@@ -1,6 +1,6 @@
-use tempfile::tempdir;
 use std::fs::{self, File};
 use std::time::Duration;
+use tempfile::tempdir;
 
 use music_file_playlist_online_sync::config::Config;
 use music_file_playlist_online_sync::watcher;
@@ -17,7 +17,8 @@ fn run_watcher_writes_initial_playlists() {
 
     // write a temporary config TOML and load via Config::from_path
     let cfg_path = td.path().join("cfg.toml");
-    let cfg_toml = format!(r#"
+    let cfg_toml = format!(
+        r#"
 root_folder = "{}"
 db_path = "{}"
 log_dir = "{}"

@@ -33,17 +33,28 @@ impl Provider for MockProvider {
     }
 
     async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<()> {
-        info!("MockProvider: rename_playlist {} -> {}", playlist_id, new_name);
+        info!(
+            "MockProvider: rename_playlist {} -> {}",
+            playlist_id, new_name
+        );
         Ok(())
     }
 
     async fn add_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
-        info!("MockProvider: add_tracks {} -> {} tracks", playlist_id, uris.len());
+        info!(
+            "MockProvider: add_tracks {} -> {} tracks",
+            playlist_id,
+            uris.len()
+        );
         Ok(())
     }
 
     async fn remove_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
-        info!("MockProvider: remove_tracks {} -> {} tracks", playlist_id, uris.len());
+        info!(
+            "MockProvider: remove_tracks {} -> {} tracks",
+            playlist_id,
+            uris.len()
+        );
         Ok(())
     }
 

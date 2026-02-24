@@ -71,14 +71,22 @@ pub async fn run_spotify_auth(cfg: &Config) -> Result<()> {
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("show_dialog", "true");
 
-    println!("Open this URL in your browser and authorize the application:\n\n{}\n", url);
+    println!(
+        "Open this URL in your browser and authorize the application:\n\n{}\n",
+        url
+    );
     println!("After authorizing, you'll be redirected to your redirect URI. Copy the full redirect URL and paste it here.");
     println!("Paste redirect URL:");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim();
     let parsed = Url::parse(input).map_err(|e| anyhow!("invalid url pasted: {}", e))?;
-    let code = parsed.query_pairs().find(|(k, _)| k == "code").ok_or_else(|| anyhow!("no code in redirect URL"))?.1.into_owned();
+    let code = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .ok_or_else(|| anyhow!("no code in redirect URL"))?
+        .1
+        .into_owned();
 
     // Exchange code for tokens
     let client = Client::new();
@@ -87,7 +95,10 @@ pub async fn run_spotify_auth(cfg: &Config) -> Result<()> {
         ("code", &code),
         ("redirect_uri", &redirect_uri),
     ];
-    let auth_header = format!("Basic {}", general_purpose::STANDARD.encode(format!("{}:{}", client_id, client_secret)));
+    let auth_header = format!(
+        "Basic {}",
+        general_purpose::STANDARD.encode(format!("{}:{}", client_id, client_secret))
+    );
     let resp = client
         .post("https://accounts.spotify.com/api/token")
         .header("Authorization", auth_header)
@@ -118,7 +129,13 @@ pub async fn run_spotify_auth(cfg: &Config) -> Result<()> {
     let client_secret = client_secret.to_string();
     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
         let conn = rusqlite::Connection::open(db_path)?;
-        db::save_credential_raw(&conn, "spotify", &token_json, Some(&client_id), Some(&client_secret))?;
+        db::save_credential_raw(
+            &conn,
+            "spotify",
+            &token_json,
+            Some(&client_id),
+            Some(&client_secret),
+        )?;
         Ok(())
     })
     .await??;

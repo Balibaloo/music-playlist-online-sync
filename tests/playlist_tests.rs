@@ -1,8 +1,8 @@
-use tempfile::tempdir;
 use std::fs::{self, File};
 use std::io::Read;
 use std::thread::sleep;
 use std::time::Duration;
+use tempfile::tempdir;
 
 use music_file_playlist_online_sync::playlist;
 
@@ -34,7 +34,10 @@ fn flat_playlist_ordering() {
     let plist2 = root.join("out2.m3u");
     playlist::write_flat_playlist(root, &plist2, "sync_order", &vec!["*.mp3".to_string()]).unwrap();
     let mut s2 = String::new();
-    File::open(&plist2).unwrap().read_to_string(&mut s2).unwrap();
+    File::open(&plist2)
+        .unwrap()
+        .read_to_string(&mut s2)
+        .unwrap();
     let lines2: Vec<&str> = s2.lines().collect();
     // Header again
     assert_eq!(lines2[0], "#EXTM3U");

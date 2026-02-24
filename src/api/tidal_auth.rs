@@ -40,7 +40,9 @@ pub async fn run_tidal_auth(cfg: &Config) -> Result<()> {
     println!("\nNow obtain a TIDAL OAuth token using the official API reference site.");
     println!("1. Open: https://tidal-music.github.io/tidal-api-reference/ in your browser.");
     println!("2. Use your TIDAL client_id and client_secret to authorize the app.");
-    println!("3. In your browser dev tools (Network tab), find the token request to auth.tidal.com.");
+    println!(
+        "3. In your browser dev tools (Network tab), find the token request to auth.tidal.com."
+    );
     println!("4. In the Response tab of that request, copy the full JSON body (access_token, refresh_token, etc.).");
     println!("\nPaste the JSON response below, then press Ctrl+D (on Linux/macOS) when you're done pasting:\n");
 
@@ -72,7 +74,13 @@ pub async fn run_tidal_auth(cfg: &Config) -> Result<()> {
     let client_secret = client_secret.to_string();
     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
         let conn = rusqlite::Connection::open(db_path)?;
-        db::save_credential_raw(&conn, "tidal", &token_json, Some(&client_id), Some(&client_secret))?;
+        db::save_credential_raw(
+            &conn,
+            "tidal",
+            &token_json,
+            Some(&client_id),
+            Some(&client_secret),
+        )?;
         Ok(())
     })
     .await??;

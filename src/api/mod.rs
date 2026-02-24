@@ -1,9 +1,9 @@
-pub mod spotify;
 pub mod mock;
-pub mod tidal;
-pub mod spotify_auth;
-pub mod tidal_auth;
 pub mod pkce;
+pub mod spotify;
+pub mod spotify_auth;
+pub mod tidal;
+pub mod tidal_auth;
 
 use anyhow::Result;
 

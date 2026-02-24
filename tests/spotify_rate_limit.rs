@@ -1,11 +1,11 @@
 use mockito::Server;
-use std::env;
-use tempfile::tempdir;
-use rusqlite::Connection;
-use serde_json::json;
 use music_file_playlist_online_sync::api::spotify::SpotifyProvider;
 use music_file_playlist_online_sync::api::Provider;
 use music_file_playlist_online_sync::db;
+use rusqlite::Connection;
+use serde_json::json;
+use std::env;
+use tempfile::tempdir;
 
 #[test]
 fn spotify_add_tracks_rate_limited_returns_rate_limited_error() {
@@ -15,7 +15,8 @@ fn spotify_add_tracks_rate_limited_returns_rate_limited_error() {
     env::set_var("SPOTIFY_AUTH_BASE", &base);
 
     // mock playlist add endpoint to return 429 with retry-after
-    let _m_add = server.mock("POST", "/playlists/mock_playlist_id/tracks")
+    let _m_add = server
+        .mock("POST", "/playlists/mock_playlist_id/tracks")
         .with_status(429)
         .with_header("retry-after", "3")
         .with_header("content-type", "application/json")
@@ -34,13 +35,16 @@ fn spotify_add_tracks_rate_limited_returns_rate_limited_error() {
         "expires_at": now + 3600,
         "refresh_token": null,
         "scope": ""
-    }).to_string();
+    })
+    .to_string();
     db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
     let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move {
-        provider.add_tracks("mock_playlist_id", &vec!["spotify:track:1".to_string()]).await
+        provider
+            .add_tracks("mock_playlist_id", &vec!["spotify:track:1".to_string()])
+            .await
     });
 
     assert!(res.is_err());

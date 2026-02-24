@@ -1,9 +1,9 @@
-use tempfile::tempdir;
-use rusqlite::Connection;
-use music_file_playlist_online_sync::db;
 use music_file_playlist_online_sync::config::Config;
-use music_file_playlist_online_sync::worker::run_worker_once;
+use music_file_playlist_online_sync::db;
 use music_file_playlist_online_sync::models::EventAction;
+use music_file_playlist_online_sync::worker::run_worker_once;
+use rusqlite::Connection;
+use tempfile::tempdir;
 
 #[test]
 fn run_worker_uses_mock_provider_and_marks_events_synced() {
@@ -46,6 +46,12 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
     rt.block_on(async move { run_worker_once(&cfg).await.unwrap() });
 
     // verify event is NOT marked synced (since no real provider is configured)
-    let cnt: i64 = conn.query_row("SELECT COUNT(*) FROM event_queue WHERE is_synced = 0", [], |r| r.get(0)).unwrap();
+    let cnt: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM event_queue WHERE is_synced = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(cnt, 1);
 }

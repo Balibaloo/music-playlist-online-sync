@@ -1,9 +1,9 @@
 use crate::api::{spotify::SpotifyProvider, tidal::TidalProvider, Provider};
+use crate::collapse::collapse_events;
 use crate::config::Config;
 use crate::db;
-use crate::collapse::collapse_events;
 use crate::models::{Event, EventAction};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 
 use std::sync::Arc;
 use uuid::Uuid;
@@ -30,7 +30,11 @@ fn log_phase_tag(phase: &str) -> String {
 /// each referenced file to a remote URI using the same cache/lookup logic as
 /// the event-driven worker (track_cache first, then ISRC/metadata lookup),
 /// and returns the resulting URI set.
-async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, provider: Arc<dyn Provider>) -> Result<Vec<String>> {
+async fn desired_remote_uris_for_playlist(
+    cfg: &Config,
+    playlist_name: &str,
+    provider: Arc<dyn Provider>,
+) -> Result<Vec<String>> {
     use std::io::BufRead;
 
     // Map logical playlist key back to on-disk .m3u path using the same
@@ -39,7 +43,10 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
     let rel = std::path::Path::new(playlist_name);
     let folder = cfg.root_folder.join(rel);
     let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let path_to_parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+    let path_to_parent = rel
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::new());
     let path_to_parent_str = if path_to_parent.as_os_str().is_empty() {
         String::new()
     } else {
@@ -49,7 +56,11 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
         }
         s
     };
-    let playlist_file_name = crate::util::expand_template(&cfg.local_playlist_template, folder_name, &path_to_parent_str);
+    let playlist_file_name = crate::util::expand_template(
+        &cfg.local_playlist_template,
+        folder_name,
+        &path_to_parent_str,
+    );
     let playlist_path = folder.join(playlist_file_name);
 
     if !playlist_path.exists() {
@@ -77,10 +88,16 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
         let db_path = cfg.db_path.clone();
         let provider_name_for_lookup = provider_name.clone();
         let local_path_for_lookup = local_path_str.clone();
-        let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, Option<String>)>, anyhow::Error> {
-            let conn = rusqlite::Connection::open(db_path)?;
-            Ok(db::get_track_cache_by_local(&conn, &provider_name_for_lookup, &local_path_for_lookup)?)
-        })
+        let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking(
+            move || -> Result<Option<(Option<String>, Option<String>)>, anyhow::Error> {
+                let conn = rusqlite::Connection::open(db_path)?;
+                Ok(db::get_track_cache_by_local(
+                    &conn,
+                    &provider_name_for_lookup,
+                    &local_path_for_lookup,
+                )?)
+            },
+        )
         .await??;
 
         if let Some((_cached_isrc, cached_remote_id)) = &cached {
@@ -92,9 +109,10 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
 
         // Try to extract ISRC from local file metadata and perform an ISRC-based search.
         let p = local_path.clone();
-        let extracted = tokio::task::spawn_blocking(move || crate::util::extract_isrc_from_path(&p))
-            .await
-            .unwrap_or(None);
+        let extracted =
+            tokio::task::spawn_blocking(move || crate::util::extract_isrc_from_path(&p))
+                .await
+                .unwrap_or(None);
 
         let mut uri_opt: Option<String> = None;
 
@@ -108,7 +126,13 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
                 let provider_name_for_cache = provider.name().to_string();
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                     let conn = rusqlite::Connection::open(db_path)?;
-                    let _ = db::upsert_track_cache(&conn, &provider_name_for_cache, &local_path_for_cache, Some(isrc.as_str()), Some(&u));
+                    let _ = db::upsert_track_cache(
+                        &conn,
+                        &provider_name_for_cache,
+                        &local_path_for_cache,
+                        Some(isrc.as_str()),
+                        Some(&u),
+                    );
                     Ok(())
                 })
                 .await??;
@@ -117,8 +141,15 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
 
         // Fallback: derive artist/title from filename and search.
         if uri_opt.is_none() {
-            let fname = local_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let stem = if let Some((base, _ext)) = fname.rsplit_once('.') { base } else { fname };
+            let fname = local_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let stem = if let Some((base, _ext)) = fname.rsplit_once('.') {
+                base
+            } else {
+                fname
+            };
             let mut candidates: Vec<(&str, &str)> = Vec::new();
             if let Some((left, right)) = stem.split_once(" - ") {
                 let left = left.trim();
@@ -139,7 +170,13 @@ async fn desired_remote_uris_for_playlist(cfg: &Config, playlist_name: &str, pro
                     let isrc_clone = extracted.clone();
                     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                         let conn = rusqlite::Connection::open(db_path)?;
-                        let _ = db::upsert_track_cache(&conn, &provider_name_for_cache, &local_path_for_cache, isrc_clone.as_deref(), Some(&u));
+                        let _ = db::upsert_track_cache(
+                            &conn,
+                            &provider_name_for_cache,
+                            &local_path_for_cache,
+                            isrc_clone.as_deref(),
+                            Some(&u),
+                        );
                         Ok(())
                     })
                     .await??;
@@ -212,7 +249,10 @@ fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key:
     // can split it into parent path and folder_name. Existing databases may
     // still contain old keys like "Album1.m3u"; for those, parent will be
     // empty and folder_name will be the whole string.
-    let normalized = playlist_key.replace('\\', "/").trim_matches('/').to_string();
+    let normalized = playlist_key
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_string();
     let normalized_str = normalized.as_str();
     let (parent_rel, folder_name) = if let Some((p, f)) = normalized_str.rsplit_once('/') {
         (p.to_string(), f.to_string())
@@ -295,8 +335,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             let path_display = db_path.display().to_string();
             let c = rusqlite::Connection::open(&db_path)
                 .with_context(|| format!("opening DB for migrations at {}", path_display))?;
-            db::run_migrations(&c)
-                .with_context(|| format!("running DB migrations using schema for {}", path_display))?;
+            db::run_migrations(&c).with_context(|| {
+                format!("running DB migrations using schema for {}", path_display)
+            })?;
             Ok(())
         }
     })
@@ -307,10 +348,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         let db_path = cfg.db_path.clone();
         move || -> Result<Vec<Event>, anyhow::Error> {
             let path_display = db_path.display().to_string();
-            let conn = rusqlite::Connection::open(&db_path)
-                .with_context(|| format!("opening DB for fetching unsynced events at {}", path_display))?;
-            db::fetch_unsynced_events(&conn)
-                .map_err(|e| e.into())
+            let conn = rusqlite::Connection::open(&db_path).with_context(|| {
+                format!(
+                    "opening DB for fetching unsynced events at {}",
+                    path_display
+                )
+            })?;
+            db::fetch_unsynced_events(&conn).map_err(|e| e.into())
         }
     })
     .await??;
@@ -339,21 +383,36 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     let db_path = cfg.db_path.clone();
     let has_spotify = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
         let path_display = db_path.display().to_string();
-        let conn = rusqlite::Connection::open(&db_path)
-            .with_context(|| format!("opening DB for loading spotify credentials at {}", path_display))?;
+        let conn = rusqlite::Connection::open(&db_path).with_context(|| {
+            format!(
+                "opening DB for loading spotify credentials at {}",
+                path_display
+            )
+        })?;
         Ok(db::load_credential_with_client(&conn, "spotify")?.is_some())
     })
     .await??;
     if has_spotify {
         log::info!("{} Using Spotify provider", log_run_tag(&worker_id));
-        providers.push(("spotify".to_string(), Arc::new(SpotifyProvider::new(String::new(), String::new(), cfg.db_path.clone()))));
+        providers.push((
+            "spotify".to_string(),
+            Arc::new(SpotifyProvider::new(
+                String::new(),
+                String::new(),
+                cfg.db_path.clone(),
+            )),
+        ));
     }
     // Tidal
     let db_path = cfg.db_path.clone();
     let has_tidal = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
         let path_display = db_path.display().to_string();
-        let conn = rusqlite::Connection::open(&db_path)
-            .with_context(|| format!("opening DB for loading tidal credentials at {}", path_display))?;
+        let conn = rusqlite::Connection::open(&db_path).with_context(|| {
+            format!(
+                "opening DB for loading tidal credentials at {}",
+                path_display
+            )
+        })?;
         Ok(db::load_credential_with_client(&conn, "tidal")?.is_some())
     })
     .await??;
@@ -384,8 +443,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
     // Group events per playlist_name
     use std::collections::HashMap;
-        let mut groups: HashMap<String, Vec<Event>> = HashMap::new();
-        for ev in events.into_iter() {
+    let mut groups: HashMap<String, Vec<Event>> = HashMap::new();
+    for ev in events.into_iter() {
         groups.entry(ev.playlist_name.clone()).or_default().push(ev);
     }
 
@@ -427,40 +486,48 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
 
             // Ensure we release lock at end
-            let release_on_exit = (cfg.db_path.clone(), playlist_name.clone(), worker_id.clone());
+            let release_on_exit = (
+                cfg.db_path.clone(),
+                playlist_name.clone(),
+                worker_id.clone(),
+            );
 
             // Collapse events
             let mut collapsed = collapse_events(evs);
 
-        let mut rename_opt: Option<(String, String)> = None;
-        let mut has_delete: bool = false;
-        let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
-        let mut original_ids: Vec<i64> = Vec::new();
-        for op in &collapsed {
-            match &op.action {
-                EventAction::Rename { from, to } => rename_opt = Some((from.clone(), to.clone())),
-                EventAction::Delete => has_delete = true,
-                EventAction::Add => track_ops.push((EventAction::Add, op.track_path.clone())),
-                EventAction::Remove => track_ops.push((EventAction::Remove, op.track_path.clone())),
-                _ => {}
+            let mut rename_opt: Option<(String, String)> = None;
+            let mut has_delete: bool = false;
+            let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
+            let mut original_ids: Vec<i64> = Vec::new();
+            for op in &collapsed {
+                match &op.action {
+                    EventAction::Rename { from, to } => {
+                        rename_opt = Some((from.clone(), to.clone()))
+                    }
+                    EventAction::Delete => has_delete = true,
+                    EventAction::Add => track_ops.push((EventAction::Add, op.track_path.clone())),
+                    EventAction::Remove => {
+                        track_ops.push((EventAction::Remove, op.track_path.clone()))
+                    }
+                    _ => {}
+                }
             }
-        }
-        for e in evs {
-            original_ids.push(e.id);
-        }
+            for e in evs {
+                original_ids.push(e.id);
+            }
 
-        let adds = track_ops
-            .iter()
-            .filter(|(a, _)| matches!(a, EventAction::Add))
-            .count();
-        let removes = track_ops
-            .iter()
-            .filter(|(a, _)| matches!(a, EventAction::Remove))
-            .count();
-        let renames = if rename_opt.is_some() { 1 } else { 0 };
-        let deletes = if has_delete { 1 } else { 0 };
+            let adds = track_ops
+                .iter()
+                .filter(|(a, _)| matches!(a, EventAction::Add))
+                .count();
+            let removes = track_ops
+                .iter()
+                .filter(|(a, _)| matches!(a, EventAction::Remove))
+                .count();
+            let renames = if rename_opt.is_some() { 1 } else { 0 };
+            let deletes = if has_delete { 1 } else { 0 };
 
-        log::info!(
+            log::info!(
             "{} {} {} events_collapsed adds={} removes={} deletes={} renames={} original_ids={}",
             log_run_tag(&worker_id),
             pl_tag,
@@ -472,566 +539,594 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             original_ids.len()
         );
 
-        // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed).
-        let remote_id_opt = tokio::task::spawn_blocking({
-            let db_path = cfg.db_path.clone();
-            let pl = playlist_name.clone();
-            let prov = provider.name().to_string();
-            move || -> Result<Option<String>, anyhow::Error> {
-                let conn = rusqlite::Connection::open(db_path)?;
-                db::get_remote_playlist_id(&conn, &prov, &pl).map_err(|e| e.into())
-            }
-        })
-        .await??;
+            // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed).
+            let remote_id_opt = tokio::task::spawn_blocking({
+                let db_path = cfg.db_path.clone();
+                let pl = playlist_name.clone();
+                let prov = provider.name().to_string();
+                move || -> Result<Option<String>, anyhow::Error> {
+                    let conn = rusqlite::Connection::open(db_path)?;
+                    db::get_remote_playlist_id(&conn, &prov, &pl).map_err(|e| e.into())
+                }
+            })
+            .await??;
 
-        // If this playlist is being deleted, attempt to delete remotely and clean up local state,
-        // then skip any add/remove operations.
-        if has_delete {
-            if let Some(remote_id) = remote_id_opt.clone() {
-                let mut attempt = 0u32;
-                loop {
-                    attempt += 1;
-                    let res = provider.delete_playlist(&remote_id).await;
-                    match res {
-                        Ok(_) => {
-                            log::info!(
-                                "{} {} {} deleted_remote_playlist id={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("DELETE"),
-                                remote_id
-                            );
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt >= cfg.max_retries_on_error {
-                                log::error!(
-                                    "{} {} {} delete_failed attempts={} error={}",
+            // If this playlist is being deleted, attempt to delete remotely and clean up local state,
+            // then skip any add/remove operations.
+            if has_delete {
+                if let Some(remote_id) = remote_id_opt.clone() {
+                    let mut attempt = 0u32;
+                    loop {
+                        attempt += 1;
+                        let res = provider.delete_playlist(&remote_id).await;
+                        match res {
+                            Ok(_) => {
+                                log::info!(
+                                    "{} {} {} deleted_remote_playlist id={}",
                                     log_run_tag(&worker_id),
                                     pl_tag,
                                     log_phase_tag("DELETE"),
-                                    attempt,
-                                    e
+                                    remote_id
                                 );
                                 break;
-                            } else {
-                                log::warn!(
-                                    "{} {} {} delete_retry attempt={} error={}",
-                                    log_run_tag(&worker_id),
-                                    pl_tag,
-                                    log_phase_tag("DELETE"),
-                                    attempt,
-                                    e
-                                );
-                                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-                                continue;
+                            }
+                            Err(e) => {
+                                if attempt >= cfg.max_retries_on_error {
+                                    log::error!(
+                                        "{} {} {} delete_failed attempts={} error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("DELETE"),
+                                        attempt,
+                                        e
+                                    );
+                                    break;
+                                } else {
+                                    log::warn!(
+                                        "{} {} {} delete_retry attempt={} error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("DELETE"),
+                                        attempt,
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(
+                                        1 << attempt,
+                                    ))
+                                    .await;
+                                    continue;
+                                }
                             }
                         }
                     }
-                }
-            } else {
-                log::info!(
-                    "{} {} {} no_remote_id_for_delete",
-                    log_run_tag(&worker_id),
-                    pl_tag,
-                    log_phase_tag("DELETE")
-                );
-            }
-
-            // Remove local playlist_map entry regardless of whether remote deletion succeeded
-            let pl = playlist_name.clone();
-            let db_path = cfg.db_path.clone();
-            let prov = provider.name().to_string();
-            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let conn = rusqlite::Connection::open(db_path)?;
-                let _ = db::delete_playlist_map(&conn, &prov, &pl)?;
-                Ok(())
-            })
-            .await??;
-
-            // Mark original events as synced (so they don't get retried forever)
-            let ids_clone = original_ids.clone();
-            let db_path = cfg.db_path.clone();
-            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let mut conn = rusqlite::Connection::open(db_path)?;
-                if !ids_clone.is_empty() {
-                    db::mark_events_synced(&mut conn, &ids_clone)?;
-                }
-                Ok(())
-            })
-            .await??;
-
-            // release lock
-            let (dbp, pln, wid) = release_on_exit.clone();
-            let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let mut conn = rusqlite::Connection::open(dbp)?;
-                db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                Ok(())
-            })
-            .await?;
-
-            log::info!(
-                "{} {} {} playlist_deleted_and_events_synced count={}",
-                log_run_tag(&worker_id),
-                pl_tag,
-                log_phase_tag("FINALIZE"),
-                original_ids.len()
-            );
-
-            // Move to next playlist/provider
-            continue;
-        }
-
-        // Precompute desired remote URIs based on the current local playlist
-        // so we can reconcile remote contents later once we have a playlist id.
-        let mut reconcile_desired: Option<Vec<String>> = None;
-        if !has_delete {
-            log::info!(
-                "{} {} {} reconcile_compute_desired_uris",
-                log_run_tag(&worker_id),
-                pl_tag,
-                log_phase_tag("RESOLVE")
-            );
-            match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone()).await {
-                Ok(desired) => {
+                } else {
                     log::info!(
-                        "{} {} {} reconcile_desired_uris_computed count={}",
+                        "{} {} {} no_remote_id_for_delete",
                         log_run_tag(&worker_id),
                         pl_tag,
-                        log_phase_tag("RESOLVE"),
-                        desired.len()
+                        log_phase_tag("DELETE")
                     );
-                    if !desired.is_empty() {
-                        reconcile_desired = Some(desired);
+                }
+
+                // Remove local playlist_map entry regardless of whether remote deletion succeeded
+                let pl = playlist_name.clone();
+                let db_path = cfg.db_path.clone();
+                let prov = provider.name().to_string();
+                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                    let conn = rusqlite::Connection::open(db_path)?;
+                    let _ = db::delete_playlist_map(&conn, &prov, &pl)?;
+                    Ok(())
+                })
+                .await??;
+
+                // Mark original events as synced (so they don't get retried forever)
+                let ids_clone = original_ids.clone();
+                let db_path = cfg.db_path.clone();
+                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                    let mut conn = rusqlite::Connection::open(db_path)?;
+                    if !ids_clone.is_empty() {
+                        db::mark_events_synced(&mut conn, &ids_clone)?;
+                    }
+                    Ok(())
+                })
+                .await??;
+
+                // release lock
+                let (dbp, pln, wid) = release_on_exit.clone();
+                let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                    let mut conn = rusqlite::Connection::open(dbp)?;
+                    db::release_playlist_lock(&mut conn, &pln, &wid)?;
+                    Ok(())
+                })
+                .await?;
+
+                log::info!(
+                    "{} {} {} playlist_deleted_and_events_synced count={}",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("FINALIZE"),
+                    original_ids.len()
+                );
+
+                // Move to next playlist/provider
+                continue;
+            }
+
+            // Precompute desired remote URIs based on the current local playlist
+            // so we can reconcile remote contents later once we have a playlist id.
+            let mut reconcile_desired: Option<Vec<String>> = None;
+            if !has_delete {
+                log::info!(
+                    "{} {} {} reconcile_compute_desired_uris",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("RESOLVE")
+                );
+                match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone()).await {
+                    Ok(desired) => {
+                        log::info!(
+                            "{} {} {} reconcile_desired_uris_computed count={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RESOLVE"),
+                            desired.len()
+                        );
+                        if !desired.is_empty() {
+                            reconcile_desired = Some(desired);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "{} {} {} reconcile_compute_desired_uris_failed error={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RESOLVE"),
+                            e
+                        );
                     }
                 }
-                Err(e) => {
-                    log::warn!(
-                        "{} {} {} reconcile_compute_desired_uris_failed error={}",
-                        log_run_tag(&worker_id),
-                        pl_tag,
-                        log_phase_tag("RESOLVE"),
-                        e
-                    );
-                }
             }
-        }
 
-        // Compute the desired remote display name for this playlist on this provider.
-        let remote_display_name = compute_remote_playlist_name(cfg, provider.name(), playlist_name);
+            // Compute the desired remote display name for this playlist on this provider.
+            let remote_display_name =
+                compute_remote_playlist_name(cfg, provider.name(), playlist_name);
 
-        let mut remote_id = if let Some(rid) = remote_id_opt {
-            rid
-        } else {
-            // create via provider.ensure_playlist
-            match provider.ensure_playlist(&remote_display_name, "").await {
-                Ok(rid) => {
-                    // persist
-                    let pl = playlist_name.clone();
-                    let db_path = cfg.db_path.clone();
-                    let rid_clone = rid.clone();
-                    let prov = provider.name().to_string();
-                    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                        let conn = rusqlite::Connection::open(db_path)?;
-                        db::upsert_playlist_map(&conn, &prov, &pl, &rid_clone)?;
-                        Ok(())
-                    })
-                    .await??;
-                    rid
-                }
-                Err(e) => {
-                    log::error!(
-                        "{} {} {} ensure_remote_playlist_failed error={}",
-                        log_run_tag(&worker_id),
-                        pl_tag,
-                        log_phase_tag("REMOTE_ID"),
-                        e
-                    );
-                    // release lock and continue
-                    let (dbp, pln, wid) = release_on_exit.clone();
-                    let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                        let mut conn = rusqlite::Connection::open(dbp)?;
-                        let _ = db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                        Ok(())
-                    })
-                    .await;
-                    continue;
-                }
-            }
-        };
-
-        // If we have a stored remote id, verify with the provider that it is
-        // still a valid, accessible playlist. This covers the case where the
-        // user "deletes" (unfollows) a Spotify playlist in the client while
-        // our local mapping still points at the old id.
-        match provider.playlist_is_valid(&remote_id).await {
-            Ok(false) => {
-                log::warn!(
-                    "{} {} {} remote_playlist_inaccessible id={}",
-                    log_run_tag(&worker_id),
-                    pl_tag,
-                    log_phase_tag("REMOTE_ID"),
-                    remote_id
-                );
+            let mut remote_id = if let Some(rid) = remote_id_opt {
+                rid
+            } else {
+                // create via provider.ensure_playlist
                 match provider.ensure_playlist(&remote_display_name, "").await {
-                    Ok(new_id) => {
-                        let db_path = cfg.db_path.clone();
+                    Ok(rid) => {
+                        // persist
                         let pl = playlist_name.clone();
+                        let db_path = cfg.db_path.clone();
+                        let rid_clone = rid.clone();
                         let prov = provider.name().to_string();
-                        let new_id_clone = new_id.clone();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = rusqlite::Connection::open(db_path)?;
-                            db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
+                            db::upsert_playlist_map(&conn, &prov, &pl, &rid_clone)?;
                             Ok(())
                         })
                         .await??;
-
-                        log::info!(
-                            "{} {} {} remote_playlist_recreated new_id={}",
-                            log_run_tag(&worker_id),
-                            pl_tag,
-                            log_phase_tag("REMOTE_ID"),
-                            new_id
-                        );
-                        remote_id = new_id;
+                        rid
                     }
                     Err(e) => {
                         log::error!(
-                            "{} {} {} remote_playlist_recreate_failed error={}",
+                            "{} {} {} ensure_remote_playlist_failed error={}",
                             log_run_tag(&worker_id),
                             pl_tag,
                             log_phase_tag("REMOTE_ID"),
                             e
                         );
-
-                        // Release lock and skip further processing for this playlist.
+                        // release lock and continue
                         let (dbp, pln, wid) = release_on_exit.clone();
-                        let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let mut conn = rusqlite::Connection::open(dbp)?;
-                            db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                            Ok(())
-                        })
-                        .await;
+                        let _ =
+                            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                                let mut conn = rusqlite::Connection::open(dbp)?;
+                                let _ = db::release_playlist_lock(&mut conn, &pln, &wid)?;
+                                Ok(())
+                            })
+                            .await;
                         continue;
                     }
                 }
-            }
-            Ok(true) => {
-                // normal case, keep existing id
-            }
-            Err(e) => {
-                log::warn!(
-                    "{} {} {} playlist_is_valid_check_failed id={} error={}",
-                    log_run_tag(&worker_id),
-                    pl_tag,
-                    log_phase_tag("REMOTE_ID"),
-                    remote_id,
-                    e
-                );
-            }
-        }
+            };
 
-        // If there was no explicit rename event for this playlist, still
-        // ensure that the remote playlist's display name matches what we
-        // compute from configuration (e.g. to apply `online_root_playlist`
-        // to playlists that were created before this option was enabled).
-        //
-        // We only attempt this if the desired remote display name differs
-        // from the logical local playlist name to avoid unnecessary rename
-        // calls when no online naming options are in use.
-        if rename_opt.is_none() && remote_display_name != *playlist_name {
-            let mut attempt = 0u32;
-            loop {
-                attempt += 1;
-                let res = provider.rename_playlist(&remote_id, &remote_display_name).await;
-                match res {
-                    Ok(_) => {
-                        log::info!(
-                            "{} {} {} ensured_display_name id={} name={}",
-                            log_run_tag(&worker_id),
-                            pl_tag,
-                            log_phase_tag("RENAME"),
-                            remote_id,
-                            remote_display_name
-                        );
-                        break;
-                    }
-                    Err(e) => {
-                        let s = format!("{}", e);
-                        // Special handling: if the provider reports that the
-                        // playlist id no longer exists (e.g. TIDAL 404),
-                        // recreate it from local state and update mappings.
-                        if s.contains("tidal rename failed: 404 Not Found") && s.contains("Playlists with id") {
-                            log::warn!(
-                                "{} {} {} missing_before_cfg_rename id={}",
+            // If we have a stored remote id, verify with the provider that it is
+            // still a valid, accessible playlist. This covers the case where the
+            // user "deletes" (unfollows) a Spotify playlist in the client while
+            // our local mapping still points at the old id.
+            match provider.playlist_is_valid(&remote_id).await {
+                Ok(false) => {
+                    log::warn!(
+                        "{} {} {} remote_playlist_inaccessible id={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("REMOTE_ID"),
+                        remote_id
+                    );
+                    match provider.ensure_playlist(&remote_display_name, "").await {
+                        Ok(new_id) => {
+                            let db_path = cfg.db_path.clone();
+                            let pl = playlist_name.clone();
+                            let prov = provider.name().to_string();
+                            let new_id_clone = new_id.clone();
+                            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                                let conn = rusqlite::Connection::open(db_path)?;
+                                db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
+                                Ok(())
+                            })
+                            .await??;
+
+                            log::info!(
+                                "{} {} {} remote_playlist_recreated new_id={}",
                                 log_run_tag(&worker_id),
                                 pl_tag,
-                                log_phase_tag("RENAME"),
-                                remote_id
+                                log_phase_tag("REMOTE_ID"),
+                                new_id
                             );
-
-                            match provider.ensure_playlist(&remote_display_name, "").await {
-                                Ok(new_id) => {
-                                    let db_path = cfg.db_path.clone();
-                                    let pl = playlist_name.clone();
-                                    let prov = provider.name().to_string();
-                                    let new_id_clone = new_id.clone();
-                                    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                        let conn = rusqlite::Connection::open(db_path)?;
-                                        db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
-                                        Ok(())
-                                    })
-                                    .await??;
-
-                                    remote_id = new_id;
-                                    log::info!(
-                                        "{} {} {} recreated_before_cfg_rename new_id={}",
-                                        log_run_tag(&worker_id),
-                                        pl_tag,
-                                        log_phase_tag("RENAME"),
-                                        remote_id
-                                    );
-
-                                    // Newly created playlist already has the desired
-                                    // display name, so we can stop retrying.
-                                    break;
-                                }
-                                Err(err) => {
-                                    log::error!(
-                                        "{} {} {} recreate_before_cfg_rename_failed error={}",
-                                        log_run_tag(&worker_id),
-                                        pl_tag,
-                                        log_phase_tag("RENAME"),
-                                        err
-                                    );
-                                    break;
-                                }
-                            }
+                            remote_id = new_id;
                         }
-
-                        if attempt >= cfg.max_retries_on_error {
+                        Err(e) => {
                             log::error!(
-                                "{} {} {} cfg_rename_failed attempts={} error={}",
+                                "{} {} {} remote_playlist_recreate_failed error={}",
                                 log_run_tag(&worker_id),
                                 pl_tag,
-                                log_phase_tag("RENAME"),
-                                attempt,
+                                log_phase_tag("REMOTE_ID"),
                                 e
                             );
-                            break;
-                        } else {
-                            let exp = std::cmp::min(1u64 << attempt, 60);
-                            log::warn!(
-                                "{} {} {} cfg_rename_retry attempt={} error={} backoff_s={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("RENAME"),
-                                attempt,
-                                e,
-                                exp
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
+
+                            // Release lock and skip further processing for this playlist.
+                            let (dbp, pln, wid) = release_on_exit.clone();
+                            let _ = tokio::task::spawn_blocking(
+                                move || -> Result<(), anyhow::Error> {
+                                    let mut conn = rusqlite::Connection::open(dbp)?;
+                                    db::release_playlist_lock(&mut conn, &pln, &wid)?;
+                                    Ok(())
+                                },
+                            )
+                            .await;
                             continue;
                         }
                     }
                 }
+                Ok(true) => {
+                    // normal case, keep existing id
+                }
+                Err(e) => {
+                    log::warn!(
+                        "{} {} {} playlist_is_valid_check_failed id={} error={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("REMOTE_ID"),
+                        remote_id,
+                        e
+                    );
+                }
             }
-        }
 
-        // Apply rename first
-        if let Some((from, to)) = rename_opt.clone() {
-            let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to);
-            let mut attempt = 0u32;
-            loop {
-                attempt += 1;
-                let res = provider.rename_playlist(&remote_id, &new_remote_name).await;
-                match res {
-                    Ok(_) => {
-                        log::info!(
-                            "{} {} {} explicit_rename id={} new_name={}",
-                            log_run_tag(&worker_id),
-                            pl_tag,
-                            log_phase_tag("RENAME"),
-                            remote_id,
-                            new_remote_name
-                        );
-                        // On successful explicit rename, migrate the playlist_map
-                        // entry so that the logical playlist key follows the
-                        // folder rename. This prevents a subsequent run for the
-                        // new logical name from calling ensure_playlist and
-                        // creating a duplicate remote playlist.
-                        let db_path = cfg.db_path.clone();
-                        let prov = provider.name().to_string();
-                        let pl_from = playlist_name.clone();
-                        let pl_to = to.clone();
-                        let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let conn = rusqlite::Connection::open(db_path)?;
-                            crate::db::migrate_playlist_map(&conn, &prov, &pl_from, &pl_to)?;
-                            Ok(())
-                        })
+            // If there was no explicit rename event for this playlist, still
+            // ensure that the remote playlist's display name matches what we
+            // compute from configuration (e.g. to apply `online_root_playlist`
+            // to playlists that were created before this option was enabled).
+            //
+            // We only attempt this if the desired remote display name differs
+            // from the logical local playlist name to avoid unnecessary rename
+            // calls when no online naming options are in use.
+            if rename_opt.is_none() && remote_display_name != *playlist_name {
+                let mut attempt = 0u32;
+                loop {
+                    attempt += 1;
+                    let res = provider
+                        .rename_playlist(&remote_id, &remote_display_name)
                         .await;
-                        // update playlist_map name? Here we keep playlist_name as local key; remote_id unchanged.
-                        break;
-                    }
-                    Err(e) => {
-                        let s = format!("{}", e);
-                        // Special handling: if the provider reports that the
-                        // playlist id no longer exists (e.g. TIDAL 404),
-                        // recreate it from local state and update mappings
-                        // using the new target name.
-                        if s.contains("tidal rename failed: 404 Not Found") && s.contains("Playlists with id") {
-                            log::warn!(
-                                "{} {} {} missing_before_explicit_rename id={}",
+                    match res {
+                        Ok(_) => {
+                            log::info!(
+                                "{} {} {} ensured_display_name id={} name={}",
                                 log_run_tag(&worker_id),
                                 pl_tag,
                                 log_phase_tag("RENAME"),
-                                remote_id
+                                remote_id,
+                                remote_display_name
                             );
+                            break;
+                        }
+                        Err(e) => {
+                            let s = format!("{}", e);
+                            // Special handling: if the provider reports that the
+                            // playlist id no longer exists (e.g. TIDAL 404),
+                            // recreate it from local state and update mappings.
+                            if s.contains("tidal rename failed: 404 Not Found")
+                                && s.contains("Playlists with id")
+                            {
+                                log::warn!(
+                                    "{} {} {} missing_before_cfg_rename id={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    remote_id
+                                );
 
-                            match provider.ensure_playlist(&new_remote_name, "").await {
-                                Ok(new_id) => {
-                                    let db_path = cfg.db_path.clone();
-                                    let pl = playlist_name.clone();
-                                    let prov = provider.name().to_string();
-                                    let new_id_clone = new_id.clone();
-                                    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                        let conn = rusqlite::Connection::open(db_path)?;
-                                        db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
-                                        Ok(())
-                                    })
-                                    .await??;
+                                match provider.ensure_playlist(&remote_display_name, "").await {
+                                    Ok(new_id) => {
+                                        let db_path = cfg.db_path.clone();
+                                        let pl = playlist_name.clone();
+                                        let prov = provider.name().to_string();
+                                        let new_id_clone = new_id.clone();
+                                        tokio::task::spawn_blocking(
+                                            move || -> Result<(), anyhow::Error> {
+                                                let conn = rusqlite::Connection::open(db_path)?;
+                                                db::upsert_playlist_map(
+                                                    &conn,
+                                                    &prov,
+                                                    &pl,
+                                                    &new_id_clone,
+                                                )?;
+                                                Ok(())
+                                            },
+                                        )
+                                        .await??;
 
-                                    remote_id = new_id;
-                                    log::info!(
-                                        "{} {} {} recreated_before_explicit_rename new_id={}",
-                                        log_run_tag(&worker_id),
-                                        pl_tag,
-                                        log_phase_tag("RENAME"),
-                                        remote_id
-                                    );
+                                        remote_id = new_id;
+                                        log::info!(
+                                            "{} {} {} recreated_before_cfg_rename new_id={}",
+                                            log_run_tag(&worker_id),
+                                            pl_tag,
+                                            log_phase_tag("RENAME"),
+                                            remote_id
+                                        );
 
-                                    // Newly created playlist already has the desired
-                                    // display name (`new_remote_name`), so we can
-                                    // stop retrying.
-                                    break;
+                                        // Newly created playlist already has the desired
+                                        // display name, so we can stop retrying.
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        log::error!(
+                                            "{} {} {} recreate_before_cfg_rename_failed error={}",
+                                            log_run_tag(&worker_id),
+                                            pl_tag,
+                                            log_phase_tag("RENAME"),
+                                            err
+                                        );
+                                        break;
+                                    }
                                 }
-                                Err(err) => {
-                                    log::error!(
+                            }
+
+                            if attempt >= cfg.max_retries_on_error {
+                                log::error!(
+                                    "{} {} {} cfg_rename_failed attempts={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    attempt,
+                                    e
+                                );
+                                break;
+                            } else {
+                                let exp = std::cmp::min(1u64 << attempt, 60);
+                                log::warn!(
+                                    "{} {} {} cfg_rename_retry attempt={} error={} backoff_s={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    attempt,
+                                    e,
+                                    exp
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply rename first
+            if let Some((from, to)) = rename_opt.clone() {
+                let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to);
+                let mut attempt = 0u32;
+                loop {
+                    attempt += 1;
+                    let res = provider.rename_playlist(&remote_id, &new_remote_name).await;
+                    match res {
+                        Ok(_) => {
+                            log::info!(
+                                "{} {} {} explicit_rename id={} new_name={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RENAME"),
+                                remote_id,
+                                new_remote_name
+                            );
+                            // On successful explicit rename, migrate the playlist_map
+                            // entry so that the logical playlist key follows the
+                            // folder rename. This prevents a subsequent run for the
+                            // new logical name from calling ensure_playlist and
+                            // creating a duplicate remote playlist.
+                            let db_path = cfg.db_path.clone();
+                            let prov = provider.name().to_string();
+                            let pl_from = playlist_name.clone();
+                            let pl_to = to.clone();
+                            let _ = tokio::task::spawn_blocking(
+                                move || -> Result<(), anyhow::Error> {
+                                    let conn = rusqlite::Connection::open(db_path)?;
+                                    crate::db::migrate_playlist_map(
+                                        &conn, &prov, &pl_from, &pl_to,
+                                    )?;
+                                    Ok(())
+                                },
+                            )
+                            .await;
+                            // update playlist_map name? Here we keep playlist_name as local key; remote_id unchanged.
+                            break;
+                        }
+                        Err(e) => {
+                            let s = format!("{}", e);
+                            // Special handling: if the provider reports that the
+                            // playlist id no longer exists (e.g. TIDAL 404),
+                            // recreate it from local state and update mappings
+                            // using the new target name.
+                            if s.contains("tidal rename failed: 404 Not Found")
+                                && s.contains("Playlists with id")
+                            {
+                                log::warn!(
+                                    "{} {} {} missing_before_explicit_rename id={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    remote_id
+                                );
+
+                                match provider.ensure_playlist(&new_remote_name, "").await {
+                                    Ok(new_id) => {
+                                        let db_path = cfg.db_path.clone();
+                                        let pl = playlist_name.clone();
+                                        let prov = provider.name().to_string();
+                                        let new_id_clone = new_id.clone();
+                                        tokio::task::spawn_blocking(
+                                            move || -> Result<(), anyhow::Error> {
+                                                let conn = rusqlite::Connection::open(db_path)?;
+                                                db::upsert_playlist_map(
+                                                    &conn,
+                                                    &prov,
+                                                    &pl,
+                                                    &new_id_clone,
+                                                )?;
+                                                Ok(())
+                                            },
+                                        )
+                                        .await??;
+
+                                        remote_id = new_id;
+                                        log::info!(
+                                            "{} {} {} recreated_before_explicit_rename new_id={}",
+                                            log_run_tag(&worker_id),
+                                            pl_tag,
+                                            log_phase_tag("RENAME"),
+                                            remote_id
+                                        );
+
+                                        // Newly created playlist already has the desired
+                                        // display name (`new_remote_name`), so we can
+                                        // stop retrying.
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        log::error!(
                                         "{} {} {} recreate_before_explicit_rename_failed error={}",
                                         log_run_tag(&worker_id),
                                         pl_tag,
                                         log_phase_tag("RENAME"),
                                         err
                                     );
-                                    break;
+                                        break;
+                                    }
                                 }
                             }
-                        }
 
-                        if attempt >= cfg.max_retries_on_error {
-                            log::error!(
-                                "{} {} {} explicit_rename_failed attempts={} error={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("RENAME"),
-                                attempt,
-                                e
-                            );
-                            break;
-                        } else {
-                            log::warn!(
-                                "{} {} {} explicit_rename_retry attempt={} error={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("RENAME"),
-                                attempt,
-                                e
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-                            continue;
+                            if attempt >= cfg.max_retries_on_error {
+                                log::error!(
+                                    "{} {} {} explicit_rename_failed attempts={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    attempt,
+                                    e
+                                );
+                                break;
+                            } else {
+                                log::warn!(
+                                    "{} {} {} explicit_rename_retry attempt={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    attempt,
+                                    e
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt))
+                                    .await;
+                                continue;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Seed add/remove lists from reconciliation diff so that remote
-        // contents exactly match the local playlist when desired.
-        let mut add_uris: Vec<String> = Vec::new();
-        let mut remove_uris: Vec<String> = Vec::new();
-        if let Some(desired) = reconcile_desired.take() {
-            match provider.list_playlist_tracks(&remote_id).await {
-                Ok(remote_current) => {
-                    use std::collections::HashSet;
-                    let desired_set: HashSet<String> = desired.into_iter().collect();
-                    let remote_set: HashSet<String> = remote_current.into_iter().collect();
+            // Seed add/remove lists from reconciliation diff so that remote
+            // contents exactly match the local playlist when desired.
+            let mut add_uris: Vec<String> = Vec::new();
+            let mut remove_uris: Vec<String> = Vec::new();
+            if let Some(desired) = reconcile_desired.take() {
+                match provider.list_playlist_tracks(&remote_id).await {
+                    Ok(remote_current) => {
+                        use std::collections::HashSet;
+                        let desired_set: HashSet<String> = desired.into_iter().collect();
+                        let remote_set: HashSet<String> = remote_current.into_iter().collect();
 
-                    let to_add: Vec<String> = desired_set
-                        .difference(&remote_set)
-                        .cloned()
-                        .collect();
-                    let to_remove: Vec<String> = remote_set
-                        .difference(&desired_set)
-                        .cloned()
-                        .collect();
+                        let to_add: Vec<String> =
+                            desired_set.difference(&remote_set).cloned().collect();
+                        let to_remove: Vec<String> =
+                            remote_set.difference(&desired_set).cloned().collect();
 
-                    if !to_add.is_empty() {
-                        log::info!(
-                            "{} {} {} reconcile_missing_tracks scheduling_adds={} ",
+                        if !to_add.is_empty() {
+                            log::info!(
+                                "{} {} {} reconcile_missing_tracks scheduling_adds={} ",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RECONCILE"),
+                                to_add.len()
+                            );
+                            add_uris.extend(to_add);
+                        }
+
+                        if !to_remove.is_empty() {
+                            log::info!(
+                                "{} {} {} reconcile_extra_tracks scheduling_removes={} ",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RECONCILE"),
+                                to_remove.len()
+                            );
+                            remove_uris.extend(to_remove);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "{} {} {} reconcile_list_remote_failed error={}",
                             log_run_tag(&worker_id),
                             pl_tag,
                             log_phase_tag("RECONCILE"),
-                            to_add.len()
+                            e
                         );
-                        add_uris.extend(to_add);
                     }
-
-                    if !to_remove.is_empty() {
-                        log::info!(
-                            "{} {} {} reconcile_extra_tracks scheduling_removes={} ",
-                            log_run_tag(&worker_id),
-                            pl_tag,
-                            log_phase_tag("RECONCILE"),
-                            to_remove.len()
-                        );
-                        remove_uris.extend(to_remove);
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "{} {} {} reconcile_list_remote_failed error={}",
-                        log_run_tag(&worker_id),
-                        pl_tag,
-                        log_phase_tag("RECONCILE"),
-                        e
-                    );
                 }
             }
-        }
 
-        // Resolve track URIs and build add/remove lists (prefer cache/ISRC when possible, then fallback to metadata search)
-        log::info!(
-            "{} {} {} resolve_uris_start ops={}",
-            log_run_tag(&worker_id),
-            pl_tag,
-            log_phase_tag("RESOLVE"),
-            track_ops.len()
-        );
+            // Resolve track URIs and build add/remove lists (prefer cache/ISRC when possible, then fallback to metadata search)
+            log::info!(
+                "{} {} {} resolve_uris_start ops={}",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("RESOLVE"),
+                track_ops.len()
+            );
 
-        for (act, track_path_opt) in track_ops.into_iter() {
-            if let Some(tp) = track_path_opt {
-                if tp.starts_with("uri::") {
-                    let uri = tp.trim_start_matches("uri::").to_string();
-                    match act {
-                        EventAction::Add => add_uris.push(uri),
-                        EventAction::Remove => remove_uris.push(uri),
-                        _ => {}
+            for (act, track_path_opt) in track_ops.into_iter() {
+                if let Some(tp) = track_path_opt {
+                    if tp.starts_with("uri::") {
+                        let uri = tp.trim_start_matches("uri::").to_string();
+                        match act {
+                            EventAction::Add => add_uris.push(uri),
+                            EventAction::Remove => remove_uris.push(uri),
+                            _ => {}
+                        }
+                        continue;
                     }
-                    continue;
-                }
 
-                // Try track cache first: reuse previously resolved URI and/or ISRC for this local path
-                let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking({
+                    // Try track cache first: reuse previously resolved URI and/or ISRC for this local path
+                    let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking({
                     let db_path = cfg.db_path.clone();
                     let local_path = tp.clone();
                     let provider_name = provider.name().to_string();
@@ -1042,137 +1137,156 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 })
                 .await??;
 
-                if let Some((_cached_isrc, cached_remote_id)) = &cached {
-                    if let Some(uri) = cached_remote_id {
-                        match act {
-                            EventAction::Add => add_uris.push(uri.clone()),
-                            EventAction::Remove => remove_uris.push(uri.clone()),
-                            _ => {}
-                        }
-                        continue;
-                    }
-                }
-
-                // Try to extract ISRC from local file metadata and perform an ISRC-based search
-                let mut isrc_for_lookup: Option<String> = cached.as_ref().and_then(|(i, _)| i.clone());
-                if isrc_for_lookup.is_none() {
-                    let p = std::path::Path::new(&tp).to_path_buf();
-                    let extracted = match tokio::task::spawn_blocking(move || crate::util::extract_isrc_from_path(&p)).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            log::warn!(
-                                "{} {} {} isrc_extract_task_failed track={} error={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("RESOLVE"),
-                                tp,
-                                e
-                            );
-                            None
-                        }
-                    };
-                    if let Some(code) = extracted {
-                        isrc_for_lookup = Some(code.clone());
-                        // persist locally extracted ISRC in cache (without remote id yet)
-                        let db_path = cfg.db_path.clone();
-                        let local_path = tp.clone();
-                        let code_for_cache = code.clone();
-                        let provider_name = provider.name().to_string();
-                        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let conn = rusqlite::Connection::open(db_path)?;
-                            let _ = crate::db::upsert_track_cache(&conn, &provider_name, &local_path, Some(code_for_cache.as_str()), None)?;
-                            Ok(())
-                        })
-                        .await??;
-                    }
-                }
-
-                if let Some(isrc) = isrc_for_lookup.clone() {
-                    match provider.search_track_uri_by_isrc(&isrc).await {
-                        Ok(Some(uri)) => {
+                    if let Some((_cached_isrc, cached_remote_id)) = &cached {
+                        if let Some(uri) = cached_remote_id {
                             match act {
                                 EventAction::Add => add_uris.push(uri.clone()),
                                 EventAction::Remove => remove_uris.push(uri.clone()),
                                 _ => {}
                             }
-                            // Persist cache with ISRC + resolved URI
+                            continue;
+                        }
+                    }
+
+                    // Try to extract ISRC from local file metadata and perform an ISRC-based search
+                    let mut isrc_for_lookup: Option<String> =
+                        cached.as_ref().and_then(|(i, _)| i.clone());
+                    if isrc_for_lookup.is_none() {
+                        let p = std::path::Path::new(&tp).to_path_buf();
+                        let extracted = match tokio::task::spawn_blocking(move || {
+                            crate::util::extract_isrc_from_path(&p)
+                        })
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                log::warn!(
+                                    "{} {} {} isrc_extract_task_failed track={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RESOLVE"),
+                                    tp,
+                                    e
+                                );
+                                None
+                            }
+                        };
+                        if let Some(code) = extracted {
+                            isrc_for_lookup = Some(code.clone());
+                            // persist locally extracted ISRC in cache (without remote id yet)
                             let db_path = cfg.db_path.clone();
                             let local_path = tp.clone();
-                            let uri_clone = uri.clone();
-                            let isrc_for_cache = isrc.clone();
+                            let code_for_cache = code.clone();
                             let provider_name = provider.name().to_string();
                             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                                 let conn = rusqlite::Connection::open(db_path)?;
-                                let _ = crate::db::upsert_track_cache(&conn, &provider_name, &local_path, Some(isrc_for_cache.as_str()), Some(&uri_clone))?;
+                                let _ = crate::db::upsert_track_cache(
+                                    &conn,
+                                    &provider_name,
+                                    &local_path,
+                                    Some(code_for_cache.as_str()),
+                                    None,
+                                )?;
                                 Ok(())
                             })
                             .await??;
-                            continue;
                         }
-                        #[allow(non_snake_case)]
-                        Ok(None) => {
-                            // fall through to metadata-based search
+                    }
+
+                    if let Some(isrc) = isrc_for_lookup.clone() {
+                        match provider.search_track_uri_by_isrc(&isrc).await {
+                            Ok(Some(uri)) => {
+                                match act {
+                                    EventAction::Add => add_uris.push(uri.clone()),
+                                    EventAction::Remove => remove_uris.push(uri.clone()),
+                                    _ => {}
+                                }
+                                // Persist cache with ISRC + resolved URI
+                                let db_path = cfg.db_path.clone();
+                                let local_path = tp.clone();
+                                let uri_clone = uri.clone();
+                                let isrc_for_cache = isrc.clone();
+                                let provider_name = provider.name().to_string();
+                                tokio::task::spawn_blocking(
+                                    move || -> Result<(), anyhow::Error> {
+                                        let conn = rusqlite::Connection::open(db_path)?;
+                                        let _ = crate::db::upsert_track_cache(
+                                            &conn,
+                                            &provider_name,
+                                            &local_path,
+                                            Some(isrc_for_cache.as_str()),
+                                            Some(&uri_clone),
+                                        )?;
+                                        Ok(())
+                                    },
+                                )
+                                .await??;
+                                continue;
+                            }
+                            #[allow(non_snake_case)]
+                            Ok(None) => {
+                                // fall through to metadata-based search
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "{} {} {} isrc_search_failed track={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RESOLVE"),
+                                    tp,
+                                    e
+                                );
+                                // fall through to metadata-based search
+                            }
                         }
-                        Err(e) => {
+                    }
+
+                    // Fallback: derive artist/title from filename and do provider metadata search.
+                    // Strip any extension and try both "Artist - Title" and "Title - Artist" orders.
+                    let fname = std::path::Path::new(&tp)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let stem = if let Some((base, _ext)) = fname.rsplit_once('.') {
+                        base
+                    } else {
+                        fname
+                    };
+
+                    let mut candidates: Vec<(&str, &str)> = Vec::new();
+                    if let Some((left, right)) = stem.split_once(" - ") {
+                        let left = left.trim();
+                        let right = right.trim();
+                        // First assume "Artist - Title"
+                        candidates.push((left, right));
+                        // Then try "Title - Artist" if the first fails
+                        candidates.push((right, left));
+                    } else {
+                        candidates.push(("", stem));
+                    }
+
+                    let mut resolved_uri: Option<String> = None;
+                    for (artist, raw_title) in candidates.into_iter() {
+                        // Normalize common duplicate suffixes like " copy 5"
+                        let mut title = raw_title.trim();
+                        let lower = title.to_ascii_lowercase();
+                        if let Some(idx) = lower.rfind(" copy ") {
+                            // Ensure suffix is exactly " copy <digits>"
+                            let suffix = &lower[idx + 6..];
+                            if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                                title = title[..idx].trim_end();
+                            }
+                        }
+
+                        if let Ok(result) = provider.search_track_uri(title, artist).await {
+                            if let Some(uri) = result {
+                                resolved_uri = Some(uri);
+                                break;
+                            } else {
+                                // try next candidate ordering
+                            }
+                        } else if let Err(e) = provider.search_track_uri(title, artist).await {
                             log::warn!(
-                                "{} {} {} isrc_search_failed track={} error={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("RESOLVE"),
-                                tp,
-                                e
-                            );
-                            // fall through to metadata-based search
-                        }
-                    }
-                }
-
-                // Fallback: derive artist/title from filename and do provider metadata search.
-                // Strip any extension and try both "Artist - Title" and "Title - Artist" orders.
-                let fname = std::path::Path::new(&tp)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let stem = if let Some((base, _ext)) = fname.rsplit_once('.') {
-                    base
-                } else {
-                    fname
-                };
-
-                let mut candidates: Vec<(&str, &str)> = Vec::new();
-                if let Some((left, right)) = stem.split_once(" - ") {
-                    let left = left.trim();
-                    let right = right.trim();
-                    // First assume "Artist - Title"
-                    candidates.push((left, right));
-                    // Then try "Title - Artist" if the first fails
-                    candidates.push((right, left));
-                } else {
-                    candidates.push(("", stem));
-                }
-
-                let mut resolved_uri: Option<String> = None;
-                for (artist, raw_title) in candidates.into_iter() {
-                    // Normalize common duplicate suffixes like " copy 5"
-                    let mut title = raw_title.trim();
-                    let lower = title.to_ascii_lowercase();
-                    if let Some(idx) = lower.rfind(" copy ") {
-                        // Ensure suffix is exactly " copy <digits>"
-                        let suffix = &lower[idx + 6..];
-                        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-                            title = title[..idx].trim_end();
-                        }
-                    }
-
-                    if let Ok(result) = provider.search_track_uri(title, artist).await {
-                        if let Some(uri) = result {
-                            resolved_uri = Some(uri);
-                            break;
-                        } else {
-                            // try next candidate ordering
-                        }
-                    } else if let Err(e) = provider.search_track_uri(title, artist).await {
-                        log::warn!(
                             "{} {} {} metadata_search_failed track={} artist={} title={} error={}",
                             log_run_tag(&worker_id),
                             pl_tag,
@@ -1182,10 +1296,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             title,
                             e
                         );
+                        }
                     }
-                }
 
-                if let Some(uri) = resolved_uri {
+                    if let Some(uri) = resolved_uri {
                         match act {
                             EventAction::Add => add_uris.push(uri.clone()),
                             EventAction::Remove => remove_uris.push(uri.clone()),
@@ -1196,59 +1310,68 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         let local_path = tp.clone();
                         let uri_clone = uri.clone();
                         let provider_clone = provider.clone();
-                        let maybe_isrc = provider_clone.lookup_track_isrc(&uri_clone).await.unwrap_or(None);
+                        let maybe_isrc = provider_clone
+                            .lookup_track_isrc(&uri_clone)
+                            .await
+                            .unwrap_or(None);
                         let provider_name = provider.name().to_string();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = rusqlite::Connection::open(db_path)?;
-                            let _ = crate::db::upsert_track_cache(&conn, &provider_name, &local_path, maybe_isrc.as_deref(), Some(&uri_clone))?;
+                            let _ = crate::db::upsert_track_cache(
+                                &conn,
+                                &provider_name,
+                                &local_path,
+                                maybe_isrc.as_deref(),
+                                Some(&uri_clone),
+                            )?;
                             Ok(())
                         })
                         .await??;
-                } else {
-                    log::warn!(
-                        "{} {} {} track_unresolved track={}",
-                        log_run_tag(&worker_id),
-                        pl_tag,
-                        log_phase_tag("RESOLVE"),
-                        tp
-                    );
+                    } else {
+                        log::warn!(
+                            "{} {} {} track_unresolved track={}",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RESOLVE"),
+                            tp
+                        );
+                    }
                 }
             }
-        }
 
-        // Deduplicate URIs in add/remove lists before applying batches.
-        // This avoids double-applying the same track when both
-        // reconciliation and event-driven paths schedule an operation
-        // for the same URI in a single run.
-        if !add_uris.is_empty() {
-            use std::collections::HashSet;
-            let mut seen: HashSet<String> = HashSet::new();
-            add_uris.retain(|u| seen.insert(u.clone()));
-        }
-        if !remove_uris.is_empty() {
-            use std::collections::HashSet;
-            let mut seen: HashSet<String> = HashSet::new();
-            remove_uris.retain(|u| seen.insert(u.clone()));
-        }
-
-        // Helper to apply batches with retry/backoff and 429 handling.
-        // If the remote playlist is reported as missing (e.g. deleted on the
-        // provider side), we will recreate it and update the playlist_map,
-        // then retry the batch once with the new playlist id.
-        async fn apply_in_batches(
-            provider: Arc<dyn Provider>,
-            playlist_id: &mut String,
-            playlist_name: &str,
-            remote_display_name: &str,
-            uris: Vec<String>,
-            is_add: bool,
-            cfg: &Config,
-            worker_id: &str,
-        ) -> Result<()> {
-            if uris.is_empty() {
-                return Ok(());
+            // Deduplicate URIs in add/remove lists before applying batches.
+            // This avoids double-applying the same track when both
+            // reconciliation and event-driven paths schedule an operation
+            // for the same URI in a single run.
+            if !add_uris.is_empty() {
+                use std::collections::HashSet;
+                let mut seen: HashSet<String> = HashSet::new();
+                add_uris.retain(|u| seen.insert(u.clone()));
             }
-            let batch_size = cfg.max_batch_size_spotify;
+            if !remove_uris.is_empty() {
+                use std::collections::HashSet;
+                let mut seen: HashSet<String> = HashSet::new();
+                remove_uris.retain(|u| seen.insert(u.clone()));
+            }
+
+            // Helper to apply batches with retry/backoff and 429 handling.
+            // If the remote playlist is reported as missing (e.g. deleted on the
+            // provider side), we will recreate it and update the playlist_map,
+            // then retry the batch once with the new playlist id.
+            async fn apply_in_batches(
+                provider: Arc<dyn Provider>,
+                playlist_id: &mut String,
+                playlist_name: &str,
+                remote_display_name: &str,
+                uris: Vec<String>,
+                is_add: bool,
+                cfg: &Config,
+                worker_id: &str,
+            ) -> Result<()> {
+                if uris.is_empty() {
+                    return Ok(());
+                }
+                let batch_size = cfg.max_batch_size_spotify;
                 for chunk in uris.chunks(batch_size) {
                     let mut attempt = 0u32;
                     loop {
@@ -1274,18 +1397,28 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             Err(e) => {
                                 let s = format!("{}", e);
                                 // Parse retry_after if provider included it in the error string like `retry_after=Some(5)`
-                                let retry_after_secs = s.split("retry_after=").nth(1).and_then(|rest| {
-                                    // rest might be like "Some(5)" or "None" or "5"
-                                    let token = rest.trim();
-                                    if token.starts_with("Some(") {
-                                        token.trim_start_matches("Some(").split(')').next()
-                                    } else if token.starts_with("None") {
-                                        None
-                                    } else {
-                                        // take digits prefix
-                                        Some(token.split(|c: char| !c.is_digit(10)).next().unwrap_or("").trim())
-                                    }
-                                }).and_then(|s| s.parse::<u64>().ok());
+                                let retry_after_secs = s
+                                    .split("retry_after=")
+                                    .nth(1)
+                                    .and_then(|rest| {
+                                        // rest might be like "Some(5)" or "None" or "5"
+                                        let token = rest.trim();
+                                        if token.starts_with("Some(") {
+                                            token.trim_start_matches("Some(").split(')').next()
+                                        } else if token.starts_with("None") {
+                                            None
+                                        } else {
+                                            // take digits prefix
+                                            Some(
+                                                token
+                                                    .split(|c: char| !c.is_digit(10))
+                                                    .next()
+                                                    .unwrap_or("")
+                                                    .trim(),
+                                            )
+                                        }
+                                    })
+                                    .and_then(|s| s.parse::<u64>().ok());
 
                                 if s.contains("rate_limited") || retry_after_secs.is_some() {
                                     let wait = retry_after_secs.unwrap_or_else(|| {
@@ -1297,19 +1430,26 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     log::warn!(
                                         "{} {} {} rate_limited wait_s={} error={}",
                                         log_run_tag(worker_id),
-                                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                        log_playlist_tag(
+                                            playlist_name,
+                                            &provider.name().to_string()
+                                        ),
                                         log_phase_tag(phase),
                                         wait,
                                         e
                                     );
-                                    tokio::time::sleep(std::time::Duration::from_secs(wait + 1)).await;
+                                    tokio::time::sleep(std::time::Duration::from_secs(wait + 1))
+                                        .await;
                                     // continue retrying until max_retries_on_error
                                     if attempt >= cfg.max_retries_on_error {
                                         let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                         log::error!(
                                             "{} {} {} rate_limit_give_up attempts={} error={}",
                                             log_run_tag(worker_id),
-                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_playlist_tag(
+                                                playlist_name,
+                                                &provider.name().to_string()
+                                            ),
                                             log_phase_tag(phase),
                                             attempt,
                                             e
@@ -1321,33 +1461,50 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     // Special handling: if the provider reports that the
                                     // playlist id no longer exists, recreate it and retry
                                     // this batch once with the new id.
-                                    if s.contains("tidal add tracks failed: 404 Not Found") && s.contains("Playlists with id") {
+                                    if s.contains("tidal add tracks failed: 404 Not Found")
+                                        && s.contains("Playlists with id")
+                                    {
                                         let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                         log::warn!(
                                             "{} {} {} playlist_missing_for_batch id={}",
                                             log_run_tag(worker_id),
-                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_playlist_tag(
+                                                playlist_name,
+                                                &provider.name().to_string()
+                                            ),
                                             log_phase_tag(phase),
                                             playlist_id
                                         );
 
                                         // Recreate the playlist via ensure_playlist using the
                                         // current display name, then update playlist_map.
-                                        match provider.ensure_playlist(remote_display_name, "").await {
+                                        match provider
+                                            .ensure_playlist(remote_display_name, "")
+                                            .await
+                                        {
                                             Ok(new_id) => {
                                                 let db_path = cfg.db_path.clone();
                                                 let pl = playlist_name.to_string();
                                                 let prov = provider.name().to_string();
                                                 let new_id_clone = new_id.clone();
-                                                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                                    let conn = rusqlite::Connection::open(db_path)?;
-                                                    crate::db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
-                                                    Ok(())
-                                                })
+                                                tokio::task::spawn_blocking(
+                                                    move || -> Result<(), anyhow::Error> {
+                                                        let conn =
+                                                            rusqlite::Connection::open(db_path)?;
+                                                        crate::db::upsert_playlist_map(
+                                                            &conn,
+                                                            &prov,
+                                                            &pl,
+                                                            &new_id_clone,
+                                                        )?;
+                                                        Ok(())
+                                                    },
+                                                )
                                                 .await??;
 
                                                 *playlist_id = new_id;
-                                                let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                                let phase =
+                                                    if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                                 log::info!(
                                                     "{} {} {} playlist_recreated_for_batch new_id={}",
                                                     log_run_tag(worker_id),
@@ -1362,7 +1519,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                                 continue;
                                             }
                                             Err(err) => {
-                                                let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                                let phase =
+                                                    if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                                 log::error!(
                                                     "{} {} {} playlist_recreate_for_batch_failed error={}",
                                                     log_run_tag(worker_id),
@@ -1379,7 +1537,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         log::error!(
                                             "{} {} {} batch_give_up attempts={} error={}",
                                             log_run_tag(worker_id),
-                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_playlist_tag(
+                                                playlist_name,
+                                                &provider.name().to_string()
+                                            ),
                                             log_phase_tag(phase),
                                             attempt,
                                             e
@@ -1391,13 +1552,17 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         log::warn!(
                                             "{} {} {} batch_retry attempt={} error={} backoff_s={}",
                                             log_run_tag(worker_id),
-                                            log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                            log_playlist_tag(
+                                                playlist_name,
+                                                &provider.name().to_string()
+                                            ),
                                             log_phase_tag(phase),
                                             attempt,
                                             e,
                                             exp
                                         );
-                                        tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
+                                        tokio::time::sleep(std::time::Duration::from_secs(exp))
+                                            .await;
                                         continue;
                                     }
                                 }
@@ -1405,57 +1570,79 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         }
                     }
                 }
-            Ok(())
-        }
-
-        let provider_arc = provider.clone();
-        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, remove_uris, false, cfg, &worker_id).await {
-            log::error!(
-                "{} {} {} apply_removes_failed error={}",
-                log_run_tag(&worker_id),
-                pl_tag,
-                log_phase_tag("BATCH_REM"),
-                e
-            );
-        }
-        if let Err(e) = apply_in_batches(provider_arc.clone(), &mut remote_id, &playlist_name, &remote_display_name, add_uris, true, cfg, &worker_id).await {
-            log::error!(
-                "{} {} {} apply_adds_failed error={}",
-                log_run_tag(&worker_id),
-                pl_tag,
-                log_phase_tag("BATCH_ADD"),
-                e
-            );
-        }
-
-        // Mark original events as synced (blocking)
-        let ids_clone = original_ids.clone();
-        let db_path = cfg.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-            let mut conn = rusqlite::Connection::open(db_path)?;
-            if !ids_clone.is_empty() {
-                db::mark_events_synced(&mut conn, &ids_clone)?;
+                Ok(())
             }
-            Ok(())
-        })
-        .await??;
 
-        // release lock
-        let (dbp, pln, wid) = release_on_exit.clone();
-        let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-            let mut conn = rusqlite::Connection::open(dbp)?;
-            db::release_playlist_lock(&mut conn, &pln, &wid)?;
-            Ok(())
-        })
-        .await?;
+            let provider_arc = provider.clone();
+            if let Err(e) = apply_in_batches(
+                provider_arc.clone(),
+                &mut remote_id,
+                &playlist_name,
+                &remote_display_name,
+                remove_uris,
+                false,
+                cfg,
+                &worker_id,
+            )
+            .await
+            {
+                log::error!(
+                    "{} {} {} apply_removes_failed error={}",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("BATCH_REM"),
+                    e
+                );
+            }
+            if let Err(e) = apply_in_batches(
+                provider_arc.clone(),
+                &mut remote_id,
+                &playlist_name,
+                &remote_display_name,
+                add_uris,
+                true,
+                cfg,
+                &worker_id,
+            )
+            .await
+            {
+                log::error!(
+                    "{} {} {} apply_adds_failed error={}",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("BATCH_ADD"),
+                    e
+                );
+            }
 
-        log::info!(
-            "{} {} {} playlist_processed events_synced={}",
-            log_run_tag(&worker_id),
-            pl_tag,
-            log_phase_tag("FINALIZE"),
-            original_ids.len()
-        );
+            // Mark original events as synced (blocking)
+            let ids_clone = original_ids.clone();
+            let db_path = cfg.db_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                let mut conn = rusqlite::Connection::open(db_path)?;
+                if !ids_clone.is_empty() {
+                    db::mark_events_synced(&mut conn, &ids_clone)?;
+                }
+                Ok(())
+            })
+            .await??;
+
+            // release lock
+            let (dbp, pln, wid) = release_on_exit.clone();
+            let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                let mut conn = rusqlite::Connection::open(dbp)?;
+                db::release_playlist_lock(&mut conn, &pln, &wid)?;
+                Ok(())
+            })
+            .await?;
+
+            log::info!(
+                "{} {} {} playlist_processed events_synced={}",
+                log_run_tag(&worker_id),
+                pl_tag,
+                log_phase_tag("FINALIZE"),
+                original_ids.len()
+            );
         }
     }
     Ok(())
@@ -1464,16 +1651,23 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 /// Nightly reconciliation: scan the root folder, write playlists for every folder,
 /// and enqueue a `Create` event so the worker will reconcile remote playlists later.
 pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
-    log::info!("Starting nightly reconcile over root folder {:?}", cfg.root_folder);
+    log::info!(
+        "Starting nightly reconcile over root folder {:?}",
+        cfg.root_folder
+    );
 
     let tree = crate::watcher::InMemoryTree::build(
         &cfg.root_folder,
-        if cfg.whitelist.is_empty() { None } else { Some(&cfg.whitelist) },
+        if cfg.whitelist.is_empty() {
+            None
+        } else {
+            Some(&cfg.whitelist)
+        },
         Some(&cfg.file_extensions),
     )?;
     // collect thread handles for the enqueue operations so we can join before returning
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
-        for (folder, _node) in tree.nodes.iter() {
+    for (folder, _node) in tree.nodes.iter() {
         // Extra safety: respect the folder whitelist again here before
         // writing playlists and enqueueing events, so reconciliation
         // never touches non-whitelisted folders even if they slipped
@@ -1485,9 +1679,15 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
             }
         }
         let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let rel = folder.strip_prefix(&cfg.root_folder).unwrap_or(folder).to_path_buf();
+        let rel = folder
+            .strip_prefix(&cfg.root_folder)
+            .unwrap_or(folder)
+            .to_path_buf();
 
-        let path_to_parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::new());
+        let path_to_parent = rel
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::new());
         let path_to_parent_str = if path_to_parent.as_os_str().is_empty() {
             String::new()
         } else {
@@ -1498,15 +1698,29 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
             s
         };
 
-        let playlist_name = crate::util::expand_template(&cfg.local_playlist_template, folder_name, &path_to_parent_str);
+        let playlist_name = crate::util::expand_template(
+            &cfg.local_playlist_template,
+            folder_name,
+            &path_to_parent_str,
+        );
         let playlist_path = folder.join(&playlist_name);
 
         if cfg.playlist_mode == "flat" {
-            if let Err(e) = crate::playlist::write_flat_playlist(folder, &playlist_path, &cfg.playlist_order_mode, &cfg.file_extensions) {
+            if let Err(e) = crate::playlist::write_flat_playlist(
+                folder,
+                &playlist_path,
+                &cfg.playlist_order_mode,
+                &cfg.file_extensions,
+            ) {
                 log::warn!("Failed to write playlist {:?}: {}", playlist_path, e);
             }
         } else {
-            if let Err(e) = crate::playlist::write_linked_playlist(folder, &playlist_path, &cfg.linked_reference_format, &cfg.local_playlist_template) {
+            if let Err(e) = crate::playlist::write_linked_playlist(
+                folder,
+                &playlist_path,
+                &cfg.linked_reference_format,
+                &cfg.local_playlist_template,
+            ) {
                 log::warn!("Failed to write linked playlist {:?}: {}", playlist_path, e);
             }
         }
@@ -1516,8 +1730,18 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         let db_path = cfg.db_path.clone();
         let h = std::thread::spawn(move || {
             if let Ok(conn) = crate::db::open_or_create(std::path::Path::new(&db_path)) {
-                if let Err(e) = crate::db::enqueue_event(&conn, &pname, &crate::models::EventAction::Create, None, None) {
-                    log::warn!("Failed to enqueue nightly create event for {}: {}", pname, e);
+                if let Err(e) = crate::db::enqueue_event(
+                    &conn,
+                    &pname,
+                    &crate::models::EventAction::Create,
+                    None,
+                    None,
+                ) {
+                    log::warn!(
+                        "Failed to enqueue nightly create event for {}: {}",
+                        pname,
+                        e
+                    );
                 }
             } else {
                 log::warn!("Failed to open DB to enqueue nightly event");
@@ -1531,7 +1755,10 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         let _ = h.join();
     }
 
-    log::info!("Nightly reconcile completed for root folder {:?}", cfg.root_folder);
+    log::info!(
+        "Nightly reconcile completed for root folder {:?}",
+        cfg.root_folder
+    );
 
     Ok(())
 }

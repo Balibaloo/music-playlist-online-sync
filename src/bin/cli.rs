@@ -46,6 +46,20 @@ enum Commands {
     QueueStatus,
     /// Clear all unsynced events from the event queue
     QueueClear,
+    /// Delete remote playlists for a provider whose names match a regex
+    DeletePlaylists {
+        /// Provider to operate on (e.g. "spotify" or "tidal")
+        #[arg(long)]
+        provider: String,
+
+        /// Regex used to match playlist names on the provider
+        #[arg(long)]
+        name_regex: String,
+
+        /// Dry run: list matching playlists but do not delete anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -361,6 +375,149 @@ async fn main() -> Result<()> {
                 },
                 Err(e) => {
                     eprintln!("Failed to open DB: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::DeletePlaylists { provider, name_regex, dry_run } => {
+            use regex::Regex;
+            use std::sync::Arc;
+
+            let re = match Regex::new(&name_regex) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Invalid regex '{}': {}", name_regex, e);
+                    std::process::exit(1);
+                }
+            };
+
+            let provider_lc = provider.to_ascii_lowercase();
+
+            match provider_lc.as_str() {
+                "spotify" => {
+                    use lib::api::spotify::SpotifyProvider;
+
+                    let db_path = cfg.db_path.clone();
+                    let prov = Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
+                    if !prov.is_authenticated() {
+                        eprintln!("Spotify provider is not authenticated. Run auth first.");
+                        std::process::exit(1);
+                    }
+
+                    let playlists = match prov.list_user_playlists().await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("Failed to list Spotify playlists: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let mut matches: Vec<(String, String)> = playlists
+                        .into_iter()
+                        .filter(|(_id, name)| re.is_match(name))
+                        .collect();
+
+                    if matches.is_empty() {
+                        println!("No Spotify playlists matched regex '{}'.", name_regex);
+                        return Ok(());
+                    }
+
+                    println!("Matched {} Spotify playlist(s):", matches.len());
+                    for (id, name) in &matches {
+                        println!("- {} ({})", name, id);
+                    }
+
+                    if dry_run {
+                        println!("Dry run: no playlists were deleted.");
+                        return Ok(());
+                    }
+
+                    let mut failed = 0usize;
+                    for (id, name) in matches.drain(..) {
+                        println!("Deleting playlist '{}' ({})...", name, id);
+                        if let Err(e) = prov.delete_playlist(&id).await {
+                            eprintln!("Failed to delete Spotify playlist '{}' ({}): {}", name, id, e);
+                            failed += 1;
+                        }
+                    }
+
+                    if failed > 0 {
+                        eprintln!(
+                            "Completed with {} failure(s) while deleting Spotify playlists.",
+                            failed
+                        );
+                        std::process::exit(1);
+                    }
+
+                    println!("All matched Spotify playlists deleted successfully.");
+                }
+                "tidal" => {
+                    use lib::api::tidal::TidalProvider;
+
+                    let db_path = cfg.db_path.clone();
+                    let root = if cfg.online_root_playlist.trim().is_empty() {
+                        None
+                    } else {
+                        Some(cfg.online_root_playlist.clone())
+                    };
+                    let prov = Arc::new(TidalProvider::new(String::new(), String::new(), db_path, root));
+                    if !prov.is_authenticated() {
+                        eprintln!("Tidal provider is not authenticated. Run auth first.");
+                        std::process::exit(1);
+                    }
+
+                    let playlists = match prov.list_user_playlists().await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("Failed to list Tidal playlists: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let mut matches: Vec<(String, String)> = playlists
+                        .into_iter()
+                        .filter(|(_id, name)| re.is_match(name))
+                        .collect();
+
+                    if matches.is_empty() {
+                        println!("No Tidal playlists matched regex '{}'.", name_regex);
+                        return Ok(());
+                    }
+
+                    println!("Matched {} Tidal playlist(s):", matches.len());
+                    for (id, name) in &matches {
+                        println!("- {} ({})", name, id);
+                    }
+
+                    if dry_run {
+                        println!("Dry run: no playlists were deleted.");
+                        return Ok(());
+                    }
+
+                    let mut failed = 0usize;
+                    for (id, name) in matches.drain(..) {
+                        println!("Deleting playlist '{}' ({})...", name, id);
+                        if let Err(e) = prov.delete_playlist(&id).await {
+                            eprintln!("Failed to delete Tidal playlist '{}' ({}): {}", name, id, e);
+                            failed += 1;
+                        }
+                    }
+
+                    if failed > 0 {
+                        eprintln!(
+                            "Completed with {} failure(s) while deleting Tidal playlists.",
+                            failed
+                        );
+                        std::process::exit(1);
+                    }
+
+                    println!("All matched Tidal playlists deleted successfully.");
+                }
+                other => {
+                    eprintln!(
+                        "Unknown provider '{}'. Expected 'spotify' or 'tidal'.",
+                        other
+                    );
                     std::process::exit(1);
                 }
             }

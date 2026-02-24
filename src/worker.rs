@@ -3,6 +3,7 @@ use crate::collapse::collapse_events;
 use crate::config::Config;
 use crate::db;
 use crate::models::{Event, EventAction};
+use crate::watcher::{compile_whitelist, matches_whitelist};
 use anyhow::{Context, Result};
 
 use std::sync::Arc;
@@ -21,6 +22,19 @@ fn log_playlist_tag(playlist: &str, provider: &str) -> String {
 
 fn log_phase_tag(phase: &str) -> String {
     format!("[PH:{:<width$}]", phase, width = PHASE_WIDTH)
+}
+
+async fn mark_events_synced_async(db_path: std::path::PathBuf, ids: Vec<i64>) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+        let mut conn = rusqlite::Connection::open(&db_path)?;
+        db::mark_events_synced(&mut conn, &ids)?;
+        Ok(())
+    })
+    .await??;
+    Ok(())
 }
 
 /// Compute the set of remote track URIs that should be present for a playlist
@@ -441,6 +455,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         return Ok(());
     }
 
+    let remote_whitelist = compile_whitelist(Some(cfg.effective_remote_whitelist()));
+
     // Group events per playlist_name
     use std::collections::HashMap;
     let mut groups: HashMap<String, Vec<Event>> = HashMap::new();
@@ -452,6 +468,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     // This ensures that for a given playlist, all configured
     // providers are updated before moving on to the next one.
     for (playlist_name, evs) in &groups {
+        let playlist_folder = cfg.root_folder.join(playlist_name);
+        if !matches_whitelist(&playlist_folder, &remote_whitelist) {
+            let ids_to_mark: Vec<i64> = evs.iter().map(|ev| ev.id).collect();
+            mark_events_synced_async(cfg.db_path.clone(), ids_to_mark).await?;
+            continue;
+        }
         // Process providers sequentially (safety). Could be parallelized with locks.
         for (provider_name, provider) in &providers {
             let pl_tag = log_playlist_tag(playlist_name, provider_name);
@@ -1656,12 +1678,13 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         cfg.root_folder
     );
 
+    let remote_whitelist = cfg.effective_remote_whitelist();
     let tree = crate::watcher::InMemoryTree::build(
         &cfg.root_folder,
-        if cfg.whitelist.is_empty() {
+        if remote_whitelist.is_empty() {
             None
         } else {
-            Some(&cfg.whitelist)
+            Some(remote_whitelist)
         },
         Some(&cfg.file_extensions),
     )?;

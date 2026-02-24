@@ -4,6 +4,8 @@ root_folder = "/music" # NOTE: the systemd services run as the
 						  # to this directory tree in order to
 						  # create/update .m3u playlist files.
 whitelist = "" # colon-separated list of regex patterns applied to full folder paths; empty -> all under root
+whitelist_playlist_watch_folders = "" # colon-separated regex whitelist for which folders get local playlists; empty -> uses `whitelist` (alias `local_whitelist`)
+whitelist_playlist_sync_to_remote_folders = "" # colon-separated regex whitelist for which folders are synced remotely; empty -> uses `whitelist` (alias `remote_whitelist`)
 local_playlist_template = "${folder_name}.m3u"
 remote_playlist_template = "${relative_path}" # legacy/default template applied when structure-specific templates are empty
 remote_playlist_template_flat = "${relative_path}"     # used when online_playlist_structure = "flat" (and/or provider has no folders)

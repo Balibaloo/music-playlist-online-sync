@@ -95,6 +95,41 @@ fn is_smb_temp_path(path: &Path) -> bool {
     false
 }
 
+/// Compile the colon-separated regex list into regex objects.
+pub fn compile_whitelist(patterns: Option<&str>) -> Option<Vec<Regex>> {
+    let patterns = match patterns.map(|s| s.trim()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return None,
+    };
+
+    let mut compiled: Vec<Regex> = Vec::new();
+    for pat in patterns.split(':') {
+        let pat = pat.trim();
+        if pat.is_empty() {
+            continue;
+        }
+        match Regex::new(pat) {
+            Ok(re) => compiled.push(re),
+            Err(e) => warn!("Invalid whitelist regex pattern {:?}: {}", pat, e),
+        }
+    }
+
+    if compiled.is_empty() {
+        None
+    } else {
+        Some(compiled)
+    }
+}
+
+pub fn matches_whitelist(path: &Path, whitelist: &Option<Vec<Regex>>) -> bool {
+    if let Some(ref wlvec) = whitelist {
+        let path_str = path.to_string_lossy();
+        wlvec.iter().any(|re| re.is_match(&path_str))
+    } else {
+        true
+    }
+}
+
 impl InMemoryTree {
     /// Build the tree by scanning the filesystem under root.
     /// - If `whitelist` is Some, it is treated as a colon-separated list of regex patterns
@@ -106,23 +141,7 @@ impl InMemoryTree {
         whitelist: Option<&str>,
         file_extensions: Option<&[String]>,
     ) -> anyhow::Result<Self> {
-        let wl = whitelist.map(|s| {
-            s.split(':')
-                .filter_map(|p| {
-                    let pat = p.trim();
-                    if pat.is_empty() {
-                        return None;
-                    }
-                    match Regex::new(pat) {
-                        Ok(re) => Some(re),
-                        Err(e) => {
-                            warn!("Invalid whitelist regex pattern {:?}: {}", pat, e);
-                            None
-                        }
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
+        let wl = compile_whitelist(whitelist);
 
         let mut nodes: HashMap<PathBuf, FolderNode> = HashMap::new();
 
@@ -210,14 +229,7 @@ impl InMemoryTree {
             // is no whitelist), treat it as a valid playlist folder even if we
             // haven't created a node yet. The caller will then create the node
             // on demand.
-            let allowed = if let Some(ref wlvec) = self.whitelist {
-                let path_str = p.to_string_lossy();
-                wlvec.iter().any(|re| re.is_match(&path_str))
-            } else {
-                true
-            };
-
-            if allowed {
+            if matches_whitelist(&p, &self.whitelist) {
                 return Some(p.clone());
             }
 
@@ -381,12 +393,13 @@ fn build_initial_tree_and_playlists(cfg: &Config) -> anyhow::Result<InMemoryTree
         .with_context(|| format!("opening or creating DB at {}", cfg.db_path.display()))?;
 
     // Build initial in-memory tree, respecting optional whitelist and file_extensions
+    let local_whitelist = cfg.effective_local_whitelist();
     let tree = InMemoryTree::build(
         &cfg.root_folder,
-        if cfg.whitelist.is_empty() {
+        if local_whitelist.is_empty() {
             None
         } else {
-            Some(&cfg.whitelist)
+            Some(local_whitelist)
         },
         Some(&cfg.file_extensions),
     )
@@ -476,6 +489,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
 
     // Wrap in-memory tree in Arc<Mutex<...>> so notify callback can update it concurrently
     let tree = Arc::new(Mutex::new(tree));
+    let remote_whitelist = Arc::new(compile_whitelist(Some(cfg.effective_remote_whitelist())));
 
     // Spawn debounce worker thread: writes playlists when their debounce timer elapses and enqueues
     // a generic Create event for the playlist.
@@ -484,6 +498,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         let cfg = cfg.clone();
         let db_path = cfg.db_path.clone();
         let _tree = tree.clone();
+        let remote_whitelist = remote_whitelist.clone();
         thread::spawn(move || {
             loop {
                 // collect due playlists
@@ -556,26 +571,28 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                     // Run DB mutations in a short-lived blocking thread so we don't block the worker loop
                     // Use the folder path relative to root as the logical
                     // playlist key for the event queue.
-                    let playlist_name2 = rel.display().to_string();
-                    let db_path2 = db_path.clone();
-                    thread::spawn(move || {
-                        if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
-                            if let Err(e) = db::enqueue_event(
-                                &conn,
-                                &playlist_name2,
-                                &EventAction::Create,
-                                None,
-                                None,
-                            ) {
-                                warn!("Failed to enqueue event for {}: {}", playlist_name2, e);
+                    if matches_whitelist(&folder, &remote_whitelist) {
+                        let playlist_name2 = rel.display().to_string();
+                        let db_path2 = db_path.clone();
+                        thread::spawn(move || {
+                            if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
+                                if let Err(e) = db::enqueue_event(
+                                    &conn,
+                                    &playlist_name2,
+                                    &EventAction::Create,
+                                    None,
+                                    None,
+                                ) {
+                                    warn!("Failed to enqueue event for {}: {}", playlist_name2, e);
+                                }
+                            } else {
+                                warn!(
+                                    "Failed to open DB at {} to enqueue event",
+                                    db_path2.display()
+                                );
                             }
-                        } else {
-                            warn!(
-                                "Failed to open DB at {} to enqueue event",
-                                db_path2.display()
-                            );
-                        }
-                    });
+                        });
+                    }
                 }
 
                 // small sleep to avoid busy-looping
@@ -589,6 +606,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     let tree_cb = tree.clone();
     let cfg_cb = cfg.clone();
     let db_path = cfg_cb.db_path.clone();
+    let remote_whitelist_cb = remote_whitelist.clone();
 
     // Create a RecommendedWatcher that will call our closure for each FS event.
     let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(
@@ -752,13 +770,28 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
                                             }
 
+                                            let remote_target_folders: Vec<std::path::PathBuf> =
+                                                target_folders
+                                                    .iter()
+                                                    .filter(|folder| {
+                                                        matches_whitelist(
+                                                            folder,
+                                                            &remote_whitelist_cb,
+                                                        )
+                                                    })
+                                                    .cloned()
+                                                    .collect();
+                                            if remote_target_folders.is_empty() {
+                                                continue;
+                                            }
+
                                             // Enqueue add events for the immediate folder and all parent
                                             // playlists so that remote parent playlists receive the track
                                             // updates as well.
                                             let db_path2 = db_path.clone();
                                             let root_folder = cfg_cb.root_folder.clone();
                                             let track = track_path.to_string_lossy().to_string();
-                                            let playlist_names: Vec<String> = target_folders
+                                            let playlist_names: Vec<String> = remote_target_folders
                                                 .iter()
                                                 .map(|folder| {
                                                     folder
@@ -833,10 +866,25 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
                                             }
 
+                                            let remote_target_folders: Vec<std::path::PathBuf> =
+                                                target_folders
+                                                    .iter()
+                                                    .filter(|folder| {
+                                                        matches_whitelist(
+                                                            folder,
+                                                            &remote_whitelist_cb,
+                                                        )
+                                                    })
+                                                    .cloned()
+                                                    .collect();
+                                            if remote_target_folders.is_empty() {
+                                                continue;
+                                            }
+
                                             let db_path2 = db_path.clone();
                                             let root_folder = cfg_cb.root_folder.clone();
                                             let track = track_path.to_string_lossy().to_string();
-                                            let playlist_names: Vec<String> = target_folders
+                                            let playlist_names: Vec<String> = remote_target_folders
                                                 .iter()
                                                 .map(|folder| {
                                                     folder
@@ -945,32 +993,35 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
                                             }
 
-                                            // Enqueue a Delete event so the worker can eventually delete
-                                            // the corresponding remote playlist.
-                                            let db_path2 = db_path.clone();
-                                            let pname = playlist_folder
-                                                .strip_prefix(&cfg_cb.root_folder)
-                                                .unwrap_or(&playlist_folder)
-                                                .display()
-                                                .to_string();
-                                            thread::spawn(move || {
-                                                if let Ok(conn) = db::open_or_create(
-                                                    std::path::Path::new(&db_path2),
-                                                ) {
-                                                    if let Err(e) = db::enqueue_event(
-                                                        &conn,
-                                                        &pname,
-                                                        &EventAction::Delete,
-                                                        None,
-                                                        None,
+                                            let remote_delete = matches_whitelist(
+                                                &playlist_folder,
+                                                &remote_whitelist_cb,
+                                            );
+                                            if remote_delete {
+                                                // Enqueue a Delete event so the worker can eventually delete
+                                                // the corresponding remote playlist.
+                                                let db_path2 = db_path.clone();
+                                                let pname = playlist_folder
+                                                    .strip_prefix(&cfg_cb.root_folder)
+                                                    .unwrap_or(&playlist_folder)
+                                                    .display()
+                                                    .to_string();
+                                                thread::spawn(move || {
+                                                    if let Ok(conn) = db::open_or_create(
+                                                        std::path::Path::new(&db_path2),
                                                     ) {
-                                                        warn!(
-                                                            "Failed to enqueue delete event: {}",
-                                                            e
-                                                        );
+                                                        if let Err(e) = db::enqueue_event(
+                                                            &conn,
+                                                            &pname,
+                                                            &EventAction::Delete,
+                                                            None,
+                                                            None,
+                                                        ) {
+                                                            warn!("Failed to enqueue delete event: {}", e);
+                                                        }
                                                     }
-                                                }
-                                            });
+                                                });
+                                            }
                                         }
                                         LogicalOp::PlaylistRename {
                                             from_folder,
@@ -1047,6 +1098,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 to_folder_name,
                                                 &to_parent_str,
                                             );
+                                            let remote_allowed_from = matches_whitelist(
+                                                &from_folder,
+                                                &remote_whitelist_cb,
+                                            );
+                                            let remote_allowed_to =
+                                                matches_whitelist(&to_folder, &remote_whitelist_cb);
 
                                             // After a folder rename/move, the playlist file that was
                                             // previously under `from_folder` is now physically located
@@ -1146,34 +1203,83 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 .to_string();
                                             let playlist_name_to = rel_to.clone();
 
-                                            let extra = match serde_json::json!({"from": playlist_name_from, "to": playlist_name_to}).to_string() {
-                                                    s => s,
-                                                };
-
-                                            let db_path2 = db_path.clone();
-                                            let pname = playlist_name_from.clone();
-                                            let extra_clone = extra.clone();
-                                            thread::spawn(move || {
-                                                if let Ok(conn) = db::open_or_create(
-                                                    std::path::Path::new(&db_path2),
-                                                ) {
-                                                    if let Err(e) = db::enqueue_event(
-                                                        &conn,
-                                                        &pname,
-                                                        &EventAction::Rename {
-                                                            from: playlist_name_from.clone(),
-                                                            to: playlist_name_to.clone(),
-                                                        },
-                                                        None,
-                                                        Some(&extra_clone),
-                                                    ) {
-                                                        warn!(
-                                                            "Failed to enqueue rename event: {}",
-                                                            e
-                                                        );
-                                                    }
+                                            match (remote_allowed_from, remote_allowed_to) {
+                                                (true, true) => {
+                                                    let extra = match serde_json::json!({"from": playlist_name_from, "to": playlist_name_to}).to_string() {
+                                                            s => s,
+                                                        };
+                                                    let db_path2 = db_path.clone();
+                                                    let pname = playlist_name_from.clone();
+                                                    let extra_clone = extra.clone();
+                                                    thread::spawn(move || {
+                                                        if let Ok(conn) = db::open_or_create(
+                                                            std::path::Path::new(&db_path2),
+                                                        ) {
+                                                            if let Err(e) = db::enqueue_event(
+                                                                &conn,
+                                                                &pname,
+                                                                &EventAction::Rename {
+                                                                    from: playlist_name_from
+                                                                        .clone(),
+                                                                    to: playlist_name_to.clone(),
+                                                                },
+                                                                None,
+                                                                Some(&extra_clone),
+                                                            ) {
+                                                                warn!(
+                                                                    "Failed to enqueue rename event: {}",
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
+                                                    });
                                                 }
-                                            });
+                                                (true, false) => {
+                                                    let db_path2 = db_path.clone();
+                                                    let pname = playlist_name_from.clone();
+                                                    thread::spawn(move || {
+                                                        if let Ok(conn) = db::open_or_create(
+                                                            std::path::Path::new(&db_path2),
+                                                        ) {
+                                                            if let Err(e) = db::enqueue_event(
+                                                                &conn,
+                                                                &pname,
+                                                                &EventAction::Delete,
+                                                                None,
+                                                                None,
+                                                            ) {
+                                                                warn!(
+                                                                    "Failed to enqueue delete event: {}",
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                (false, true) => {
+                                                    let db_path2 = db_path.clone();
+                                                    let pname = playlist_name_to.clone();
+                                                    thread::spawn(move || {
+                                                        if let Ok(conn) = db::open_or_create(
+                                                            std::path::Path::new(&db_path2),
+                                                        ) {
+                                                            if let Err(e) = db::enqueue_event(
+                                                                &conn,
+                                                                &pname,
+                                                                &EventAction::Create,
+                                                                None,
+                                                                None,
+                                                            ) {
+                                                                warn!(
+                                                                    "Failed to enqueue create event: {}",
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                _ => {}
+                                            }
                                         }
                                     }
                                 }

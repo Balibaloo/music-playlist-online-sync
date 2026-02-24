@@ -6,6 +6,16 @@ pub struct Config {
     pub root_folder: PathBuf,
     #[serde(default)]
     pub whitelist: String,
+    /// Optional whitelist for local playlist generation (`whitelist_playlist_watch_folders`). Falls back to `whitelist` when empty.
+    #[serde(rename = "whitelist_playlist_watch_folders")]
+    #[serde(alias = "local_whitelist")]
+    #[serde(default)]
+    pub local_whitelist: String,
+    /// Optional whitelist for remote syncing (`whitelist_playlist_sync_to_remote_folders`). Falls back to `whitelist` when empty.
+    #[serde(rename = "whitelist_playlist_sync_to_remote_folders")]
+    #[serde(alias = "remote_whitelist")]
+    #[serde(default)]
+    pub remote_whitelist: String,
     #[serde(default = "default_local_template")]
     pub local_playlist_template: String,
     #[serde(default = "default_remote_template")]
@@ -148,6 +158,24 @@ fn default_file_extensions() -> Vec<String> {
 }
 
 impl Config {
+    /// Returns the whitelist used for local playlist generation (fallbacks to legacy field).
+    pub fn effective_local_whitelist(&self) -> &str {
+        if !self.local_whitelist.is_empty() {
+            &self.local_whitelist
+        } else {
+            &self.whitelist
+        }
+    }
+
+    /// Returns the whitelist used for remote syncing (fallbacks to legacy field).
+    pub fn effective_remote_whitelist(&self) -> &str {
+        if !self.remote_whitelist.is_empty() {
+            &self.remote_whitelist
+        } else {
+            &self.whitelist
+        }
+    }
+
     pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {
         let s = std::fs::read_to_string(path)?;
         let cfg: Config = toml::from_str(&s)?;

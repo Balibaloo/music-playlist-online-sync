@@ -369,7 +369,7 @@ impl TidalProvider {
         Ok(())
     }
 
-    async fn get_bearer(&self) -> Result<String> {
+    pub async fn get_bearer(&self) -> Result<String> {
         self.ensure_token().await?;
         let lock = self.token.lock().await;
         let st = lock

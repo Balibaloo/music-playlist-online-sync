@@ -242,13 +242,16 @@ async fn main() -> Result<()> {
                     match rename_playlist(mapped_id.clone(), new_name.clone()).await {
                         Ok(()) => {
                             if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                                let _ = music_file_playlist_online_sync::db::upsert_playlist_map(
+                                // Migrate the existing mapping from the old logical
+                                // name to the new one so the old key is removed and
+                                // future runs find the correct highest index.
+                                let _ = music_file_playlist_online_sync::db::migrate_playlist_map(
                                     &conn,
                                     provider_name,
+                                    &mapped_name,
                                     &new_name,
-                                    &mapped_id,
                                 );
-                                println!("[DEBUG] Mapping updated in DB.");
+                                println!("[DEBUG] Mapping migrated in DB.");
                             }
                             println!("{} auth test complete.", provider_name);
                             return Ok(());

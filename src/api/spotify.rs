@@ -249,9 +249,19 @@ impl SpotifyProvider {
     async fn persist_token_to_db(&self, st: &StoredToken) -> Result<()> {
         let db_path = self.db_path.clone();
         let s = serde_json::to_string(&st)?;
+        // Pass the client credentials explicitly so the UPSERT does not
+        // overwrite them with NULL and wipe them from the DB on every refresh.
+        let client_id = self.client_id.clone();
+        let client_secret = self.client_secret.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::save_credential_raw(&conn, "spotify", &s, None, None)?;
+            db::save_credential_raw(
+                &conn,
+                "spotify",
+                &s,
+                Some(&client_id),
+                Some(&client_secret),
+            )?;
             Ok(())
         })
         .await??;

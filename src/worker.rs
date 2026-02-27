@@ -612,8 +612,16 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         attempt,
                                         e
                                     );
+                                    let sleep_secs = 1 << attempt;
+                                    log::info!(
+                                        "{} {} {} Sleeping for {} seconds",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("DELETE"),
+                                        sleep_secs
+                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(
-                                        1 << attempt,
+                                        sleep_secs,
                                     ))
                                     .await;
                                     continue;
@@ -758,72 +766,116 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             // still a valid, accessible playlist. This covers the case where the
             // user "deletes" (unfollows) a Spotify playlist in the client while
             // our local mapping still points at the old id.
-            match provider.playlist_is_valid(&remote_id).await {
-                Ok(false) => {
-                    log::warn!(
-                        "{} {} {} remote_playlist_inaccessible id={}",
-                        log_run_tag(&worker_id),
-                        pl_tag,
-                        log_phase_tag("REMOTE_ID"),
-                        remote_id
-                    );
-                    match provider.ensure_playlist(&remote_display_name, "").await {
-                        Ok(new_id) => {
-                            let db_path = cfg.db_path.clone();
-                            let pl = playlist_name.clone();
-                            let prov = provider.name().to_string();
-                            let new_id_clone = new_id.clone();
-                            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                let conn = rusqlite::Connection::open(db_path)?;
-                                db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
-                                Ok(())
-                            })
-                            .await??;
-
-                            log::info!(
-                                "{} {} {} remote_playlist_recreated new_id={}",
+            // verify playlist validity, retrying on transient errors (429/rate limit)
+            {
+                let mut attempt = 0u32;
+                loop {
+                    attempt += 1;
+                    match provider.playlist_is_valid(&remote_id).await {
+                        Ok(false) => {
+                            log::warn!(
+                                "{} {} {} remote_playlist_inaccessible id={}",
                                 log_run_tag(&worker_id),
                                 pl_tag,
                                 log_phase_tag("REMOTE_ID"),
-                                new_id
+                                remote_id
                             );
-                            remote_id = new_id;
+                            match provider.ensure_playlist(&remote_display_name, "").await {
+                                Ok(new_id) => {
+                                    let db_path = cfg.db_path.clone();
+                                    let pl = playlist_name.clone();
+                                    let prov = provider.name().to_string();
+                                    let new_id_clone = new_id.clone();
+                                    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                                        let conn = rusqlite::Connection::open(db_path)?;
+                                        db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
+                                        Ok(())
+                                    })
+                                    .await??;
+
+                                    log::info!(
+                                        "{} {} {} remote_playlist_recreated new_id={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("REMOTE_ID"),
+                                        new_id
+                                    );
+                                    remote_id = new_id;
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "{} {} {} remote_playlist_recreate_failed error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("REMOTE_ID"),
+                                        e
+                                    );
+
+                                    // Release lock and skip further processing for this playlist.
+                                    let (dbp, pln, wid) = release_on_exit.clone();
+                                    let _ = tokio::task::spawn_blocking(
+                                        move || -> Result<(), anyhow::Error> {
+                                            let mut conn = rusqlite::Connection::open(dbp)?;
+                                            db::release_playlist_lock(&mut conn, &pln, &wid)?;
+                                            Ok(())
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                            break;
+                        }
+                        Ok(true) => {
+                            // normal case, keep existing id
+                            break;
                         }
                         Err(e) => {
-                            log::error!(
-                                "{} {} {} remote_playlist_recreate_failed error={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("REMOTE_ID"),
-                                e
-                            );
-
-                            // Release lock and skip further processing for this playlist.
-                            let (dbp, pln, wid) = release_on_exit.clone();
-                            let _ = tokio::task::spawn_blocking(
-                                move || -> Result<(), anyhow::Error> {
-                                    let mut conn = rusqlite::Connection::open(dbp)?;
-                                    db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                                    Ok(())
-                                },
-                            )
-                            .await;
-                            continue;
+                            let s = format!("{}", e);
+                            if s.contains("rate_limited") || s.contains("429") {
+                                // back off and retry
+                                let exp = std::cmp::min(1u64 << attempt, 60);
+                                log::warn!(
+                                    "{} {} {} rate_limited remote_id_wait_s={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("REMOTE_ID"),
+                                    exp,
+                                    e
+                                );
+                                log::info!(
+                                    "{} {} {} Sleeping for {} seconds",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("REMOTE_ID"),
+                                    exp
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
+                                if attempt >= cfg.max_retries_on_error {
+                                    log::error!(
+                                        "{} {} {} remote_id_check_give_up attempts={} error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("REMOTE_ID"),
+                                        attempt,
+                                        e
+                                    );
+                                    break;
+                                }
+                                continue;
+                            } else {
+                                log::warn!(
+                                    "{} {} {} playlist_is_valid_check_failed id={} error={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("REMOTE_ID"),
+                                    remote_id,
+                                    e
+                                );
+                                break;
+                            }
                         }
                     }
-                }
-                Ok(true) => {
-                    // normal case, keep existing id
-                }
-                Err(e) => {
-                    log::warn!(
-                        "{} {} {} playlist_is_valid_check_failed id={} error={}",
-                        log_run_tag(&worker_id),
-                        pl_tag,
-                        log_phase_tag("REMOTE_ID"),
-                        remote_id,
-                        e
-                    );
                 }
             }
 
@@ -935,6 +987,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     log_phase_tag("RENAME"),
                                     attempt,
                                     e,
+                                    exp
+                                );
+                                log::info!(
+                                    "{} {} {} Sleeping for {} seconds",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
                                     exp
                                 );
                                 tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
@@ -1067,7 +1126,15 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     attempt,
                                     e
                                 );
-                                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt))
+                                let sleep_secs = 1 << attempt;
+                                log::info!(
+                                    "{} {} {} Sleeping for {} seconds",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("RENAME"),
+                                    sleep_secs
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs))
                                     .await;
                                 continue;
                             }
@@ -1470,6 +1537,18 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                         wait,
                                         e
                                     );
+                                    // also log the actual sleep duration so it's easy to spot in
+                                    // the logs when a 429 triggers backoff
+                                    log::info!(
+                                        "{} {} {} Sleeping for {} seconds",
+                                        log_run_tag(worker_id),
+                                        log_playlist_tag(
+                                            playlist_name,
+                                            &provider.name().to_string()
+                                        ),
+                                        log_phase_tag(phase),
+                                        wait + 1
+                                    );
                                     tokio::time::sleep(std::time::Duration::from_secs(wait + 1))
                                         .await;
                                     // continue retrying until max_retries_on_error
@@ -1591,6 +1670,16 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                             log_phase_tag(phase),
                                             attempt,
                                             e,
+                                            exp
+                                        );
+                                        log::info!(
+                                            "{} {} {} Sleeping for {} seconds",
+                                            log_run_tag(worker_id),
+                                            log_playlist_tag(
+                                                playlist_name,
+                                                &provider.name().to_string()
+                                            ),
+                                            log_phase_tag(phase),
                                             exp
                                         );
                                         tokio::time::sleep(std::time::Duration::from_secs(exp))

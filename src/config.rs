@@ -71,6 +71,14 @@ pub struct Config {
     #[serde(default = "default_max_batch_spotify")]
     pub max_batch_size_spotify: usize,
 
+    /// Maximum number of tracks to send in a single batch request when
+    /// talking to the TIDAL API.  The official documentation caps this at
+    /// 20 items; any larger request will reliably return
+    /// `INVALID_REQUEST_BODY size must be between 1 and 20` (see issue
+    /// reported by users).  The default here reflects the hard limit.
+    #[serde(default = "default_max_batch_tidal")]
+    pub max_batch_size_tidal: usize,
+
     // path to database file
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
@@ -141,6 +149,10 @@ fn default_max_retries() -> u32 {
 }
 fn default_max_batch_spotify() -> usize {
     100
+}
+
+fn default_max_batch_tidal() -> usize {
+    20
 }
 fn default_db_path() -> PathBuf {
     "/var/lib/music-sync/music-sync.db".into()

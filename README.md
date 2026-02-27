@@ -72,6 +72,11 @@ music-file-playlist-online-sync auth spotify
 
 Tidal
 
+*Note*: the Tidal API only accepts 1‑20 tracks per batch request.  The
+config option `max_batch_size_tidal` (default 20) is automatically
+capped so the worker never submits a larger payload; this avoids the
+"size must be between 1 and 20" errors seen in earlier logs.
+
 Issue board skeleton
 
 

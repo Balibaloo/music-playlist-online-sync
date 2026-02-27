@@ -18,6 +18,8 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
     let cfg = Config {
         root_folder: td.path().join("root"),
         whitelist: String::new(),
+        local_whitelist: String::new(),
+        remote_whitelist: String::new(),
         local_playlist_template: "${folder_name}.m3u".into(),
         remote_playlist_template: "${relative_path}".into(),
         remote_playlist_template_flat: String::new(),
@@ -34,6 +36,7 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
         queue_length_stop_cloud_sync_threshold: None,
         max_retries_on_error: 3,
         max_batch_size_spotify: 100,
+        max_batch_size_tidal: 20,
         file_extensions: vec!["*.mp3".into()],
         online_root_playlist: String::new(),
         online_playlist_structure: "flat".into(),

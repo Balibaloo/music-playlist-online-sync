@@ -1393,7 +1393,17 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 if uris.is_empty() {
                     return Ok(());
                 }
-                let batch_size = cfg.max_batch_size_spotify;
+                // choose an appropriate batch size for the provider
+                // we call.  Spotify tolerates large payloads (configurable),
+                // but Tidal is strictly limited to 1–20 items per request
+                // according to their API.  Applying the provider-specific
+                // cap here prevents 400 errors such as
+                // "size must be between 1 and 20" which were flooding the
+                // logs.
+                let batch_size = match provider.name() {
+                    "tidal" => cfg.max_batch_size_tidal,
+                    _ => cfg.max_batch_size_spotify,
+                };
                 for chunk in uris.chunks(batch_size) {
                     let mut attempt = 0u32;
                     loop {

@@ -31,7 +31,13 @@ max_retries_on_error = 3
 # 429 / rate-limited responses are handled with Retry-After/backoff and do not count against max_retries_on_error
 
 # tunables
+# maximum items to send in a single batch when syncing to Spotify
 max_batch_size_spotify = 100
+# Tidal enforces a much smaller limit; requests larger than this
+# will be rejected with “size must be between 1 and 20”.
+# This value defaults to 20 and can be lowered if you have an
+# especially slow connection.
+max_batch_size_tidal = 20
 
 # DB path (default)
 db_path = "/var/lib/music-sync/music-sync.db"

@@ -14,6 +14,8 @@ fn nightly_reconcile_enqueues_events() -> Result<(), Box<dyn std::error::Error>>
     let cfg = music_file_playlist_online_sync::config::Config {
         root_folder: root.clone(),
         whitelist: String::new(),
+        local_whitelist: String::new(),
+        remote_whitelist: String::new(),
         local_playlist_template: "${folder_name}.m3u".into(),
         remote_playlist_template: "${relative_path}".into(),
         remote_playlist_template_flat: String::new(),
@@ -30,6 +32,7 @@ fn nightly_reconcile_enqueues_events() -> Result<(), Box<dyn std::error::Error>>
         queue_length_stop_cloud_sync_threshold: None,
         max_retries_on_error: 3,
         max_batch_size_spotify: 100,
+        max_batch_size_tidal: 20,
         file_extensions: vec!["*.mp3".into()],
         online_root_playlist: String::new(),
         online_playlist_structure: "flat".into(),

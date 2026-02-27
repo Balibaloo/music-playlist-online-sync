@@ -761,7 +761,13 @@ impl Provider for TidalProvider {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(2);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_after + 1)).await;
+                let sleep_secs = retry_after + 1;
+                log::info!(
+                    "TidalProvider ensure_playlist rate limited for playlist '{}' – sleeping {} seconds",
+                    name,
+                    sleep_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
                 continue;
             }
 
@@ -842,7 +848,13 @@ impl Provider for TidalProvider {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(2);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_after + 1)).await;
+                let sleep_secs = retry_after + 1;
+                log::info!(
+                    "TidalProvider rename_playlist rate limited for id {} – sleeping {} seconds",
+                    playlist_id,
+                    sleep_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
                 continue;
             }
 

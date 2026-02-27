@@ -481,7 +481,13 @@ impl Provider for SpotifyProvider {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(2);
-                tokio::time::sleep(std::time::Duration::from_secs(retry_after + 1)).await;
+                let sleep_secs = retry_after + 1;
+                log::info!(
+                    "SpotifyProvider rename_playlist rate limited for playlist {} – sleeping {} seconds",
+                    playlist_id,
+                    sleep_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
                 continue;
             }
 

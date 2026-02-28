@@ -881,21 +881,37 @@ impl Provider for TidalProvider {
         );
         // Convert URIs like "tidal:track:{id}" into JSON:API relationship objects
         // { "data": [{"type": "tracks", "id": "{id}"}, ...] }.
+        // Filter out any IDs that are not positive integers; the API will reject
+        // 0 or non-numeric values which can arise from failed lookups.
+        let mut invalid_count = 0;
         let data: Vec<serde_json::Value> = uris
             .iter()
             .filter_map(|u| {
                 let id = u.rsplit(':').next().unwrap_or("").trim();
-                if id.is_empty() {
-                    None
-                } else {
+                // require a strictly positive integer
+                if id.parse::<u64>().ok().filter(|&n| n > 0).is_some() {
                     // TIDAL's DELETE playlist items endpoint expects a non-null
                     // `meta` object on each relationship identifier; an empty
                     // object satisfies the schema and avoids INVALID_REQUEST_BODY
                     // errors like "data/0/meta must not be null".
                     Some(json!({ "type": "tracks", "id": id, "meta": {} }))
+                } else {
+                    log::warn!(
+                        "tidal add_tracks ignoring invalid id {:?} from uri {:?}",
+                        id,
+                        u
+                    );
+                    invalid_count += 1;
+                    None
                 }
             })
             .collect();
+        if invalid_count > 0 {
+            log::warn!(
+                "tidal add_tracks skipped {} invalid uri(s)",
+                invalid_count
+            );
+        }
         if data.is_empty() {
             // Nothing to add once URIs are normalized.
             return Ok(());
@@ -930,12 +946,20 @@ impl Provider for TidalProvider {
         let cc = Self::country_code();
 
         // Normalize requested URIs into raw track ids and build a set
-        // for efficient lookup when scanning playlist items.
+        // for efficient lookup when scanning playlist items.  Skip anything that
+        // isn’t a positive integer; invalid values will never be present in the
+        // playlist so there’s no need to query the API for them.
         let mut track_ids: HashSet<String> = HashSet::new();
         for u in uris {
             let id = u.rsplit(':').next().unwrap_or("").trim();
-            if !id.is_empty() {
+            if id.parse::<u64>().ok().filter(|&n| n > 0).is_some() {
                 track_ids.insert(id.to_string());
+            } else {
+                log::warn!(
+                    "tidal remove_tracks ignoring invalid id {:?} from uri {:?}",
+                    id,
+                    u
+                );
             }
         }
         if track_ids.is_empty() {
@@ -1032,9 +1056,14 @@ impl Provider for TidalProvider {
             .or_else(|| j["items"]["items"].as_array().and_then(|a| a.get(0)));
         if let Some(item) = first {
             if let Some(id) = item["id"].as_str() {
-                return Ok(Some(format!("tidal:track:{}", id)));
+                // skip obviously invalid values
+                if !id.is_empty() && id != "0" {
+                    return Ok(Some(format!("tidal:track:{}", id)));
+                }
             } else if let Some(id_num) = item["id"].as_i64() {
-                return Ok(Some(format!("tidal:track:{}", id_num)));
+                if id_num > 0 {
+                    return Ok(Some(format!("tidal:track:{}", id_num)));
+                }
             }
         }
         Ok(None)
@@ -1065,9 +1094,13 @@ impl Provider for TidalProvider {
         let first = j["data"].as_array().and_then(|a| a.get(0));
         if let Some(item) = first {
             if let Some(id) = item["id"].as_str() {
-                return Ok(Some(format!("tidal:track:{}", id)));
+                if !id.is_empty() && id != "0" {
+                    return Ok(Some(format!("tidal:track:{}", id)));
+                }
             } else if let Some(id_num) = item["id"].as_i64() {
-                return Ok(Some(format!("tidal:track:{}", id_num)));
+                if id_num > 0 {
+                    return Ok(Some(format!("tidal:track:{}", id_num)));
+                }
             }
         }
         Ok(None)

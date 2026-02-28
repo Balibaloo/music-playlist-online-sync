@@ -272,6 +272,34 @@ pub async fn desired_remote_uris_for_playlist(
     let mut seen = std::collections::HashSet::new();
     uris.retain(|u| seen.insert(u.clone()));
 
+    // If we're targeting Tidal, drop any URIs whose numeric id isn't a
+    // strictly positive integer.  This mirrors the filtering in
+    // TidalProvider::add_tracks and ensures we don't propagate bad values
+    // farther upstream (which could otherwise trigger the 400 errors seen in
+    // the logs).
+    if provider.name() == "tidal" {
+        let mut dropped = 0;
+        uris.retain(|u| {
+            let id = u.rsplit(':').next().unwrap_or("").trim();
+            if id.parse::<u64>().ok().filter(|&n| n > 0).is_some() {
+                true
+            } else {
+                log::warn!(
+                    "reconcile: dropping invalid tidal uri {:?} generated from local playlist",
+                    u
+                );
+                dropped += 1;
+                false
+            }
+        });
+        if dropped > 0 {
+            log::warn!(
+                "reconcile: removed {} invalid tidal uri(s) before caching",
+                dropped
+            );
+        }
+    }
+
     // store the result in the cache for next time
     {
         let db_path = cfg.db_path.clone();

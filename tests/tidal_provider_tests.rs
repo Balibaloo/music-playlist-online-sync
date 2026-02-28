@@ -6,9 +6,18 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::env;
 use tempfile::tempdir;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+// Global mutex to serialize these tests because they manipulate
+// process-wide environment variables and mockito servers.  Without
+// serialization, concurrent runs can point one test at another test's
+// server and produce spurious 501s.
+static TIDAL_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
 fn tidal_ensure_playlist_happy_path() {
+    let _guard = TIDAL_TEST_LOCK.lock().unwrap();
     let mut server = Server::new();
     let base = server.url();
     env::set_var("TIDAL_API_BASE", &base);
@@ -16,8 +25,12 @@ fn tidal_ensure_playlist_happy_path() {
 
     // TidalProvider::ensure_playlist calls POST /playlists?countryCode=US, so
     // the mock must include the query string or mockito will return 501.
+    // allow an extra leading slash in case the base URL ends with '/'
     let _m_create = server
-        .mock("POST", "/playlists?countryCode=US")
+        .mock(
+            "POST",
+            Matcher::Regex("^//?playlists\\?countryCode=US$".into()),
+        )
         .with_status(201)
         .with_header("content-type", "application/json")
         .with_body(json!({ "id": "tidal_pl_1" }).to_string())
@@ -51,6 +64,7 @@ fn tidal_ensure_playlist_happy_path() {
 
 #[test]
 fn tidal_add_tracks_filters_invalid_ids() {
+    let _guard = TIDAL_TEST_LOCK.lock().unwrap();
     let mut server = Server::new();
     let base = server.url();
     env::set_var("TIDAL_API_BASE", &base);
@@ -77,7 +91,10 @@ fn tidal_add_tracks_filters_invalid_ids() {
 
     // case A: mixed valid/invalid URIs. expect exactly one POST with the valid id
     let mut m_add = server
-        .mock("POST", "/playlists/playlist1/relationships/items?countryCode=US")
+        .mock(
+            "POST",
+            Matcher::Regex("^//?playlists/playlist1/relationships/items\\?countryCode=US$".into()),
+        )
         .match_body(Matcher::Regex("\\\"id\\\":\\\"123\\\"".into()))
         .with_status(200)
         .expect(1)
@@ -97,7 +114,10 @@ fn tidal_add_tracks_filters_invalid_ids() {
 
     // case B: entirely invalid list should not send any requests
     let mut m_none = server
-        .mock("POST", "/playlists/playlist1/relationships/items?countryCode=US")
+        .mock(
+            "POST",
+            Matcher::Regex("^//?playlists/playlist1/relationships/items\\?countryCode=US$".into()),
+        )
         .with_status(200)
         .expect(0)
         .create();
@@ -114,6 +134,7 @@ fn tidal_add_tracks_filters_invalid_ids() {
 
 #[test]
 fn tidal_search_helpers_ignore_zero_ids() {
+    let _guard = TIDAL_TEST_LOCK.lock().unwrap();
     let mut server = Server::new();
     let base = server.url();
     env::set_var("TIDAL_API_BASE", &base);

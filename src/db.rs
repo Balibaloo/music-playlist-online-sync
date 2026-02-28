@@ -26,12 +26,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     ];
 
     let mut last_err: Option<std::io::Error> = None;
+    let mut applied = false;
     for path in &candidates {
         match std::fs::read_to_string(path) {
             Ok(sql) => {
                 conn.execute_batch(&sql)
                     .with_context(|| format!("applying DB schema from {}", path))?;
-                return Ok(());
+                applied = true;
+                break;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Try next candidate.
@@ -42,16 +44,39 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         }
     }
 
-    // If we get here, none of the candidate schema files were found.
-    // In a packaged install this is fine because schema is applied by
-    // the .install script; for dev, it means migrations are simply
-    // skipped.
-    if let Some(e) = last_err {
-        tracing::debug!(
-            "DB schema file not found at any known location; skipping migrations: {}",
-            e
-        );
+    // If we didn't apply any schema file, that's not necessarily an error –
+    // packaged installs may have already applied schema via the .install
+    // hook.  Log at debug level so the situation is visible during
+    // development.
+    if !applied {
+        if let Some(e) = last_err {
+            tracing::debug!(
+                "DB schema file not found at any known location; skipping migrations: {}",
+                e
+            );
+        }
     }
+
+    // ------------------------------------------------------------------
+    // Perform one–time data migrations that cannot be expressed via raw
+    // schema.sql.  Historically the `track_cache.local_path` column held
+    // the bare filesystem path for Spotify entries; other providers were
+    // added later and namespaced by prefixing with "<provider>::".  To
+    // allow us to switch to a uniformly-prefixed key we update any rows
+    // that lack the separator so that subsequent lookups work correctly.
+    // This is safe to run on every start because the WHERE clause only
+    // matches unprefixed values.
+    //
+    // We deliberately ignore "no such table" errors, which can happen if
+    // the schema has not been applied yet; in that case the caller will
+    // apply the schema and run migrations again when it re‑opens the
+    // database.
+    let _ = conn.execute(
+        "UPDATE track_cache SET local_path = 'spotify::' || local_path \
+         WHERE local_path NOT LIKE '%::%';",
+        [],
+    );
+
     Ok(())
 }
 
@@ -327,12 +352,13 @@ pub fn migrate_playlist_cache(
 
 
 fn track_cache_key(provider: &str, local_path: &str) -> String {
-    // Keep legacy behavior for Spotify so existing rows remain valid.
-    if provider.eq_ignore_ascii_case("spotify") {
-        local_path.to_string()
-    } else {
-        format!("{}::{}", provider.to_lowercase(), local_path)
-    }
+    // All providers are now namespaced in the cache key.  In the very first
+    // releases only Spotify existed and we stored the raw local path; that
+    // caused a mismatch when additional providers were added.  We still need
+    // to support old databases, so `run_migrations` will rewrite any
+    // existing rows that lack a prefix.  Once the migration has run the
+    // helper can consistently prepend the provider name.
+    format!("{}::{}", provider.to_lowercase(), local_path)
 }
 
 /// Lookup a track cache entry by local path, scoped by provider
@@ -372,6 +398,29 @@ pub fn upsert_track_cache(
         params![isrc, key, remote_id],
     )?;
     Ok(())
+}
+
+/// Lookup a track cache entry by remote URI. Returns (isrc, local_path, resolved_at)
+/// if an entry exists. This is used when we receive an event originating from
+/// another provider; we convert it back to a local file path so that the target
+/// provider can perform its own lookup against the local collection.
+pub fn get_track_cache_by_remote(
+    conn: &Connection,
+    remote_uri: &str,
+) -> Result<Option<(Option<String>, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT isrc, local_path, COALESCE(resolved_at,0) FROM track_cache WHERE remote_id = ?1 LIMIT 1",
+    )?;
+    let row = stmt
+        .query_row(params![remote_uri], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .optional()?;
+    Ok(row)
 }
 
 /// Try to acquire a processing lock for a playlist. Returns true if lock acquired.

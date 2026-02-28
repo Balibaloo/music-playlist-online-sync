@@ -1339,7 +1339,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             );
 
             for (act, track_path_opt) in track_ops.into_iter() {
-                if let Some(tp) = track_path_opt {
+                if let Some(mut tp) = track_path_opt {
+                    // provider-originated URIs may come in directly; we want to
+                    // re-resolve everything against the *local* files so that each
+                    // destination provider does its own availability lookup.  The
+                    // only case where we accept a bare URI is when the event was
+                    // generated locally (`uri::…`).
                     if tp.starts_with("uri::") {
                         let uri = tp.trim_start_matches("uri::").to_string();
                         match act {
@@ -1348,6 +1353,36 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             _ => {}
                         }
                         continue;
+                    }
+
+                    // non-local URIs (spotify:track:..., tidal:track:...) should be
+                    // mapped back to a local path via the cache.  If the cache has no
+                    // entry, we drop the operation entirely; the local playlist file
+                    // is the golden source.
+                    if tp.contains(':') && !tp.starts_with(&format!("{}:", provider.name())) {
+                        let db_path = cfg.db_path.clone();
+                        let uri_clone = tp.clone();
+                        if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
+                            let conn = rusqlite::Connection::open(db_path)?;
+                            Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
+                        })
+                        .await??
+                        {
+                            // the stored path may include an old provider prefix ("tidal::foo")
+                            // when we migrated the cache.  strip anything up to the first
+                            // "::" so that the downstream resolution logic always works with
+                            // the raw filesystem path.
+                            if let Some(idx) = local_path.find("::") {
+                                local_path = local_path[idx + 2..].to_string();
+                            }
+                            tp = local_path;
+                        } else {
+                            log::warn!(
+                                "reconcile: skipping provider URI {} because no corresponding local file was cached",
+                                tp
+                            );
+                            continue;
+                        }
                     }
 
                     // Try track cache first (with timestamp) to avoid unnecessary lookups

@@ -1,7 +1,9 @@
 use music_file_playlist_online_sync::db;
 use music_file_playlist_online_sync::api;
 use music_file_playlist_online_sync::models;
-use rusqlite::Connection;
+use music_file_playlist_online_sync::api::Provider;
+use music_file_playlist_online_sync::models::EventAction;
+use rusqlite::{Connection, params};
 use tempfile::tempdir;
 use chrono::Utc;
 use std::sync::Arc;
@@ -43,6 +45,47 @@ fn playlist_map_and_track_cache_persistence() {
     let (_isrc2, rid2, ts2) = neg.unwrap();
     assert!(rid2.is_none());
     assert!((Utc::now().timestamp() - ts2).abs() < 60);
+}
+
+#[test]
+fn track_cache_migration_prefixes_spotify_entries() {
+    let td = tempdir().unwrap();
+    let db_path = td.path().join("migration.db");
+    let conn = Connection::open(&db_path).unwrap();
+
+    // create the track_cache table manually to simulate an older version
+    conn.execute_batch(
+        "CREATE TABLE track_cache (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             isrc TEXT,
+             local_path TEXT UNIQUE,
+             remote_id TEXT,
+             resolved_at INTEGER
+         );",
+    )
+    .unwrap();
+
+    // insert an unprefixed spotify row
+    conn.execute(
+        "INSERT INTO track_cache (isrc, local_path, remote_id, resolved_at) VALUES (?1, ?2, ?3, strftime('%s','now'))",
+        params![Some("ISRC"), "/foo/bar.mp3", Some("rid")],
+    )
+    .unwrap();
+
+    // running migrations should rewrite the entry
+    db::run_migrations(&conn).unwrap();
+
+    let row: (Option<String>, Option<String>, String) = conn
+        .query_row(
+            "SELECT isrc, remote_id, local_path FROM track_cache LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+
+    assert_eq!(row.0.unwrap(), "ISRC");
+    assert_eq!(row.1.unwrap(), "rid");
+    assert_eq!(row.2, "spotify::/foo/bar.mp3");
 }
 
 
@@ -257,6 +300,152 @@ async fn skip_resolve_when_track_ops() {
     // nothing should have been looked up
     assert_eq!(*counter.lock().unwrap(), 0);
 }
+
+// verify that when a track operation comes from another provider we still
+// resolve it via the local playlist/track cache and convert to the target
+// provider's URI.  a missing local mapping should cause the op to be dropped.
+#[tokio::test]
+async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("root");
+    std::fs::create_dir_all(root.join("foo")).unwrap();
+    std::fs::write(root.join("foo").join("song.mp3"), b"data").unwrap();
+    let playlist_path = root.join("foo").join("foo.m3u");
+    std::fs::write(&playlist_path, "song.mp3\n").unwrap();
+
+    let cfg_file = td.path().join("cfg.toml");
+    let db_file = td.path().join("test.db");
+    std::fs::write(
+        &cfg_file,
+        format!(
+            "root_folder = \"{}\"\ndb_path = \"{}\"\n",
+            root.display(),
+            db_file.display()
+        ),
+    )
+    .unwrap();
+    let cfg = music_file_playlist_online_sync::config::Config::from_path(&cfg_file).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
+        music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
+        // populate cache entries
+        music_file_playlist_online_sync::db::upsert_track_cache(&conn, "spotify", "song.mp3", None, Some("spotify:track:foo")).unwrap();
+        music_file_playlist_online_sync::db::upsert_track_cache(&conn, "tidal", "song.mp3", None, Some("tidal:track:100")).unwrap();
+    }
+
+    struct DummyProvider;
+    #[async_trait::async_trait]
+    impl api::Provider for DummyProvider {
+        fn name(&self) -> &str { "tidal" }
+        fn is_authenticated(&self) -> bool { true }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> { Ok("id".into()) }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
+        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> { Ok(true) }
+        async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> { Ok(None) }
+    }
+
+    let provider = Arc::new(DummyProvider);
+
+    // emulate the loop body from worker.rs for a provider URI op
+    let mut add_uris: Vec<String> = Vec::new();
+    let mut remove_uris: Vec<String> = Vec::new();
+    let mut track_ops: Vec<(models::EventAction, Option<String>)> = Vec::new();
+    track_ops.push((models::EventAction::Add, Some("spotify:track:foo".to_string())));
+
+    for (act, track_path_opt) in track_ops.into_iter() {
+        if let Some(mut tp) = track_path_opt {
+            if tp.starts_with("uri::") {
+                let uri = tp.trim_start_matches("uri::").to_string();
+                match act {
+                    EventAction::Add => add_uris.push(uri),
+                    EventAction::Remove => remove_uris.push(uri),
+                    _ => {}
+                }
+                continue;
+            }
+            if tp.contains(':') && !tp.starts_with(&format!("{}:", provider.name())) {
+                let db_path = cfg.db_path.clone();
+                let uri_clone = tp.clone();
+                if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
+                    let conn = rusqlite::Connection::open(db_path)?;
+                    Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
+                })
+                .await??
+                {
+                    if let Some(idx) = local_path.find("::") {
+                        local_path = local_path[idx + 2..].to_string();
+                    }
+                    tp = local_path;
+                } else {
+                    continue;
+                }
+            }
+            // after mapping we just push the cached tidal URI
+            let cached: Option<(Option<String>, Option<String>, i64)> =
+                tokio::task::spawn_blocking({
+                    let db_path = cfg.db_path.clone();
+                    let local_path = tp.clone();
+                    let provider_name = provider.name().to_string();
+                    move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
+                        let conn = rusqlite::Connection::open(db_path)?;
+                        Ok(db::get_track_cache_by_local(&conn, &provider_name, &local_path)?)
+                    }
+                })
+                .await??;
+            if let Some((_i, remote, _)) = &cached {
+                if let Some(uri) = remote {
+                    match act {
+                        EventAction::Add => add_uris.push(uri.clone()),
+                        EventAction::Remove => remove_uris.push(uri.clone()),
+                        _ => {}
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
+    assert_eq!(add_uris, vec!["tidal:track:100".to_string()]);
+    assert!(remove_uris.is_empty());
+
+    // now try with a URI that has no local mapping; it should be skipped.
+    let mut add_uris2: Vec<String> = Vec::new();
+    let mut track_ops2: Vec<(models::EventAction, Option<String>)> = Vec::new();
+    track_ops2.push((models::EventAction::Add, Some("spotify:track:missing".to_string())));
+    for (act, track_path_opt) in track_ops2.into_iter() {
+        if let Some(mut tp) = track_path_opt {
+            if tp.contains(':') && !tp.starts_with(&format!("{}:", provider.name())) {
+                let db_path = cfg.db_path.clone();
+                let uri_clone = tp.clone();
+                if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
+                    let conn = rusqlite::Connection::open(db_path)?;
+                    Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
+                })
+                .await??
+                {
+                    // mirror the stripping logic added to the worker
+                    if let Some(idx) = local_path.find("::") {
+                        local_path = local_path[idx + 2..].to_string();
+                    }
+                    tp = local_path;
+                } else {
+                    continue;
+                }
+            }
+            add_uris2.push(tp);
+        }
+    }
+    assert!(add_uris2.is_empty(), "URI without local mapping should be dropped");
+    Ok(())
+}
+
 // rename-only scenario should behave the same way; although there are no track
 // operations the user is simply renaming a folder, so we should not resolve
 // the playlist contents until later (nothing will be added/removed).

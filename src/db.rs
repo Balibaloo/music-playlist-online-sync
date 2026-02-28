@@ -325,23 +325,6 @@ pub fn migrate_playlist_cache(
     Ok(())
 }
 
-/// Upsert a playlist cache entry. This is called after we resolve a playlist
-/// file to a set of remote URIs so we can return the cached result the next
-/// time the file is unchanged.
-pub fn upsert_playlist_cache(
-    conn: &Connection,
-    playlist_name: &str,
-    file_mtime: i64,
-    file_size: i64,
-    file_hash: &str,
-    uris_json: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO playlist_cache (playlist_name, file_mtime, file_size, file_hash, uris) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(playlist_name) DO UPDATE SET file_mtime = excluded.file_mtime, file_size = excluded.file_size, file_hash = excluded.file_hash, uris = excluded.uris",
-        params![playlist_name, file_mtime, file_size, file_hash, uris_json],
-    )?;
-    Ok(())
-}
 
 fn track_cache_key(provider: &str, local_path: &str) -> String {
     // Keep legacy behavior for Spotify so existing rows remain valid.

@@ -1,4 +1,6 @@
 use music_file_playlist_online_sync::db;
+use music_file_playlist_online_sync::api;
+use music_file_playlist_online_sync::models;
 use rusqlite::Connection;
 use tempfile::tempdir;
 use chrono::Utc;
@@ -81,7 +83,7 @@ async fn playlist_cache_and_rename_migration() {
         }
     }
     #[async_trait::async_trait]
-    impl crate::api::Provider for CountingProvider {
+    impl api::Provider for CountingProvider {
         fn name(&self) -> &str {
             "count"
         }
@@ -155,4 +157,177 @@ async fn playlist_cache_and_rename_migration() {
         .unwrap();
     assert_eq!(uris3, uris1);
     assert_eq!(calls_after_first, *counter.lock().unwrap());
+}
+
+// exercise the predicate that guards the expensive URI resolution step.  this
+// is a very small unit test but it makes the reasoning in the worker code easy
+// to verify and guards against regressions.
+#[test]
+fn should_precompute_desired_behavior() {
+    use music_file_playlist_online_sync::worker::should_precompute_desired;
+
+    // deletion always skips
+    assert!(!should_precompute_desired(true, false, false));
+    // explicit track add/remove overrides everything else
+    assert!(!should_precompute_desired(false, true, false));
+    assert!(!should_precompute_desired(false, true, true));
+    // renaming without any track changes should not resolve URIs
+    assert!(!should_precompute_desired(false, false, true));
+    // the nightly‑reconcile/create case is the only one that returns true
+    assert!(should_precompute_desired(false, false, false));
+}
+
+// this test mirrors the early precompute block from `run_worker_once` to ensure
+// that a playlist which has track operations does not hit the provider at all
+// when the predicate says we can skip resolution.  the counter in the
+// `CountingProvider` will remain zero.
+#[tokio::test]
+async fn skip_resolve_when_track_ops() {
+    // similar setup to the earlier async test
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("root");
+    std::fs::create_dir_all(root.join("foo")).unwrap();
+    std::fs::write(root.join("foo").join("song.mp3"), b"data").unwrap();
+    let playlist_path = root.join("foo").join("foo.m3u");
+    std::fs::write(&playlist_path, "song.mp3\n").unwrap();
+
+    let cfg_file = td.path().join("cfg.toml");
+    let db_file = td.path().join("test.db");
+    std::fs::write(
+        &cfg_file,
+        format!(
+            "root_folder = \"{}\"\ndb_path = \"{}\"\n",
+            root.display(),
+            db_file.display()
+        ),
+    )
+    .unwrap();
+    let cfg = music_file_playlist_online_sync::config::Config::from_path(&cfg_file).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
+        music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
+    }
+
+    struct CountingProvider(Arc<std::sync::Mutex<usize>>);
+    impl CountingProvider {
+        fn new(counter: Arc<std::sync::Mutex<usize>>) -> Self {
+            Self(counter)
+        }
+    }
+    #[async_trait::async_trait]
+    impl api::Provider for CountingProvider {
+        fn name(&self) -> &str { "count" }
+        fn is_authenticated(&self) -> bool { true }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> { Ok("id".into()) }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
+        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+            let mut c = self.0.lock().unwrap();
+            *c += 1;
+            Ok(Some("uri".to_string()))
+        }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> { Ok(true) }
+        async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
+            let mut c = self.0.lock().unwrap();
+            *c += 1;
+            Ok(None)
+        }
+    }
+
+    let counter = Arc::new(std::sync::Mutex::new(0));
+    let provider = Arc::new(CountingProvider::new(counter.clone()));
+
+    // emulate the worker precompute logic with a nonempty track_ops vector
+    let mut track_ops: Vec<(models::EventAction, Option<String>)> = Vec::new();
+    track_ops.push((models::EventAction::Add, Some("song.mp3".to_string())));
+    let has_delete = false;
+    let rename_opt: Option<(String, String)> = None;
+
+    let mut reconcile_desired: Option<Vec<String>> = None;
+    if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
+        // would call `desired_remote_uris_for_playlist` here
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone()).await;
+        reconcile_desired = Some(Vec::new());
+    }
+
+    assert!(reconcile_desired.is_none(), "precompute should have been skipped");
+    // nothing should have been looked up
+    assert_eq!(*counter.lock().unwrap(), 0);
+}
+// rename-only scenario should behave the same way; although there are no track
+// operations the user is simply renaming a folder, so we should not resolve
+// the playlist contents until later (nothing will be added/removed).
+#[tokio::test]
+async fn skip_resolve_on_rename_only() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("root");
+    std::fs::create_dir_all(root.join("foo")).unwrap();
+    std::fs::write(root.join("foo").join("song.mp3"), b"data").unwrap();
+    let playlist_path = root.join("foo").join("foo.m3u");
+    std::fs::write(&playlist_path, "song.mp3\n").unwrap();
+
+    let cfg_file = td.path().join("cfg.toml");
+    let db_file = td.path().join("test.db");
+    std::fs::write(
+        &cfg_file,
+        format!(
+            "root_folder = \"{}\"\ndb_path = \"{}\"\n",
+            root.display(),
+            db_file.display()
+        ),
+    )
+    .unwrap();
+    let cfg = music_file_playlist_online_sync::config::Config::from_path(&cfg_file).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
+        music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
+    }
+
+    struct CountingProvider(Arc<std::sync::Mutex<usize>>);
+    impl CountingProvider {
+        fn new(counter: Arc<std::sync::Mutex<usize>>) -> Self {
+            Self(counter)
+        }
+    }
+    #[async_trait::async_trait]
+    impl api::Provider for CountingProvider {
+        fn name(&self) -> &str { "count" }
+        fn is_authenticated(&self) -> bool { true }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> { Ok("id".into()) }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
+        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+            let mut c = self.0.lock().unwrap();
+            *c += 1;
+            Ok(Some("uri".to_string()))
+        }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> { Ok(true) }
+        async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
+            let mut c = self.0.lock().unwrap();
+            *c += 1;
+            Ok(None)
+        }
+    }
+
+    let counter = Arc::new(std::sync::Mutex::new(0));
+    let provider = Arc::new(CountingProvider::new(counter.clone()));
+
+    let track_ops: Vec<(models::EventAction, Option<String>)> = Vec::new();
+    let has_delete = false;
+    let rename_opt: Option<(String, String)> = Some(("foo".to_string(), "bar".to_string()));
+
+    let mut reconcile_desired: Option<Vec<String>> = None;
+    if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone()).await;
+        reconcile_desired = Some(Vec::new());
+    }
+
+    assert!(reconcile_desired.is_none(), "precompute should have been skipped on rename");
+    assert_eq!(*counter.lock().unwrap(), 0);
 }

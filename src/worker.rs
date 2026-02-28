@@ -48,7 +48,7 @@ async fn mark_events_synced_async(db_path: std::path::PathBuf, ids: Vec<i64>) ->
 /// each referenced file to a remote URI using the same cache/lookup logic as
 /// the event-driven worker (track_cache first, then ISRC/metadata lookup),
 /// and returns the resulting URI set.
-async fn desired_remote_uris_for_playlist(
+pub async fn desired_remote_uris_for_playlist(
     cfg: &Config,
     playlist_name: &str,
     provider: Arc<dyn Provider>,
@@ -304,6 +304,22 @@ fn provider_supports_folder_nesting(provider_name: &str) -> bool {
         "tidal" => false,
         _ => true,
     }
+}
+
+/// Decide whether we should pre‑compute the set of desired remote URIs for a
+/// playlist before performing any reconciliation work.
+///
+/// The worker historically called `desired_remote_uris_for_playlist` early in
+/// the processing of each playlist, even when the only action was a rename.  In
+/// that case we were resolving a potentially large local playlist for no good
+/// reason.  The caller can avoid the expense by invoking this predicate and
+/// delaying the actual work until a change is required.
+pub fn should_precompute_desired(has_delete: bool, has_track_ops: bool, has_rename: bool) -> bool {
+    // We only want to calculate the desired URIs if we're not handling a
+    // deletion, and there are no explicit track operations or renames.  A
+    // nightly "create" event will pass `(false, false, false)` which is the
+    // only case where this returns true during normal operation.
+    !has_delete && !has_track_ops && !has_rename
 }
 
 /// Compute the display name to use for a remote playlist on a given provider,
@@ -594,7 +610,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             );
 
             // Collapse events
-            let mut collapsed = collapse_events(evs);
+            let collapsed = collapse_events(evs);
 
             let mut rename_opt: Option<(String, String)> = None;
             let mut has_delete: bool = false;
@@ -763,8 +779,17 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Precompute desired remote URIs based on the current local playlist
             // so we can reconcile remote contents later once we have a playlist id.
+            //
+            // IMPORTANT: this operation can be expensive (it may hit the provider for
+            // every track in the local playlist) so avoid doing it unless we know we
+            // are going to perform a modification.  In particular we skip the work if
+            // there are any explicit track add/remove events or if the only thing we
+            // are doing is a rename.  A nightly ``Create`` event still needs the
+            // computation because it's the only way we can detect an out‑of‑sync
+            // playlist.
             let mut reconcile_desired: Option<Vec<String>> = None;
-            if !has_delete {
+            let has_track_ops = !track_ops.is_empty();
+            if !has_delete && !has_track_ops && rename_opt.is_none() {
                 log::info!(
                     "{} {} {} reconcile_compute_desired_uris",
                     log_run_tag(&worker_id),
@@ -1084,7 +1109,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             }
 
             // Apply rename first
-            if let Some((from, to)) = rename_opt.clone() {
+            if let Some((_from, to)) = rename_opt.clone() {
                 let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to);
                 let mut attempt = 0u32;
                 loop {

@@ -85,6 +85,32 @@ async fn desired_remote_uris_for_playlist(
         return Ok(Vec::new());
     }
 
+    // compute metadata so we can consult the cache
+    let meta = std::fs::metadata(&playlist_path)?;
+    let file_mtime = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let file_size = meta.len() as i64;
+    let file_hash = crate::util::hash_file(&playlist_path)?;
+
+    // check playlist cache; if the file is unchanged we can return early
+    if let Some((cached_mtime, cached_size, cached_hash, uris_json)) = {
+        let db_path = cfg.db_path.clone();
+        let playlist_name = playlist_name.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<(i64, i64, String, String)>, anyhow::Error> {
+            let conn = rusqlite::Connection::open(db_path)?;
+            Ok(db::get_playlist_cache(&conn, &playlist_name)?)
+        })
+        .await??
+    } {
+        if cached_mtime == file_mtime && cached_size == file_size && cached_hash == file_hash {
+            // parse the cached JSON and return
+            let uris: Vec<String> = serde_json::from_str(&uris_json).unwrap_or_default();
+            return Ok(uris);
+        }
+    }
+
     let file = std::fs::File::open(&playlist_path)?;
     let reader = std::io::BufReader::new(file);
     let mut uris: Vec<String> = Vec::new();
@@ -245,6 +271,28 @@ async fn desired_remote_uris_for_playlist(
     // Deduplicate while preserving order.
     let mut seen = std::collections::HashSet::new();
     uris.retain(|u| seen.insert(u.clone()));
+
+    // store the result in the cache for next time
+    {
+        let db_path = cfg.db_path.clone();
+        let playlist_name = playlist_name.to_string();
+        let uris_json = serde_json::to_string(&uris)?;
+        let file_hash_clone = file_hash.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+            let conn = rusqlite::Connection::open(db_path)?;
+            db::upsert_playlist_cache(
+                &conn,
+                &playlist_name,
+                file_mtime,
+                file_size,
+                &file_hash_clone,
+                &uris_json,
+            )?;
+            Ok(())
+        })
+        .await??;
+    }
+
     Ok(uris)
 }
 
@@ -1066,6 +1114,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     let conn = rusqlite::Connection::open(db_path)?;
                                     crate::db::migrate_playlist_map(
                                         &conn, &prov, &pl_from, &pl_to,
+                                    )?;
+                                    // keep playlist cache in sync as well
+                                    crate::db::migrate_playlist_cache(
+                                        &conn, &pl_from, &pl_to,
                                     )?;
                                     Ok(())
                                 },

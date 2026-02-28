@@ -29,6 +29,17 @@ CREATE TABLE IF NOT EXISTS track_cache (
   resolved_at INTEGER
 );
 
+-- playlist cache: stores metadata for the last-read .m3u file so we can
+-- short-circuit expensive resolution when nothing has changed.  The
+-- `uris` column contains a JSON array of the computed remote URIs.
+CREATE TABLE IF NOT EXISTS playlist_cache (
+  playlist_name TEXT PRIMARY KEY,
+  file_mtime INTEGER NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_hash TEXT NOT NULL,
+  uris TEXT NOT NULL
+);
+
 
 -- credentials (now with client_id and client_secret)
 CREATE TABLE IF NOT EXISTS credentials (

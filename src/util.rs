@@ -40,3 +40,30 @@ pub fn extract_isrc_from_path(path: &std::path::Path) -> Option<String> {
 
     tag.get_string(&ItemKey::Isrc).map(|s| s.to_string())
 }
+
+/// Compute a lightweight fingerprint for the given file by hashing its
+/// entire contents with SHA256.  The value is used to detect whether a
+/// playlist file has been modified in a way that might not bump its
+/// modification time (e.g. an editor that rewrites the file in place).
+///
+/// The implementation is intentionally simple in order to minimise
+/// dependencies and race conditions; callers can cheaply recompute the
+/// hash on every worker run.
+pub fn hash_file(path: &std::path::Path) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::fs::File;
+    use std::io::{BufReader, Read};
+
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}

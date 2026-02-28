@@ -264,6 +264,85 @@ pub fn migrate_playlist_map(
     Ok(())
 }
 
+
+/// Lookup a playlist cache entry by logical playlist name. Returns
+/// (file_mtime, file_size, file_hash, uris_json) if an entry exists.
+pub fn get_playlist_cache(
+    conn: &Connection,
+    playlist_name: &str,
+) -> Result<Option<(i64, i64, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT file_mtime, file_size, file_hash, uris FROM playlist_cache WHERE playlist_name = ?1 LIMIT 1",
+    )?;
+    let row = stmt
+        .query_row(params![playlist_name], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .optional()?;
+    Ok(row)
+}
+
+/// Upsert a playlist cache entry. This is called after we resolve a playlist
+/// file to a set of remote URIs so we can return the cached result the next
+/// time the file is unchanged.
+pub fn upsert_playlist_cache(
+    conn: &Connection,
+    playlist_name: &str,
+    file_mtime: i64,
+    file_size: i64,
+    file_hash: &str,
+    uris_json: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO playlist_cache (playlist_name, file_mtime, file_size, file_hash, uris) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(playlist_name) DO UPDATE SET file_mtime = excluded.file_mtime, file_size = excluded.file_size, file_hash = excluded.file_hash, uris = excluded.uris",
+        params![playlist_name, file_mtime, file_size, file_hash, uris_json],
+    )?;
+    Ok(())
+}
+
+/// Migrate a playlist cache entry from one logical name to another.  When a
+/// playlist folder is renamed, the worker performs a similar migration on
+/// `playlist_map` so that remote IDs aren't duplicated; the cache needs to be
+/// moved as well so that the checksum check continues to work after the
+/// rename.  If the source entry does not exist this is a no-op.
+pub fn migrate_playlist_cache(
+    conn: &Connection,
+    from_playlist_name: &str,
+    to_playlist_name: &str,
+) -> Result<()> {
+    if let Some((mtime, size, hash, uris)) = get_playlist_cache(conn, from_playlist_name)? {
+        upsert_playlist_cache(conn, to_playlist_name, mtime, size, &hash, &uris)?;
+        conn.execute(
+            "DELETE FROM playlist_cache WHERE playlist_name = ?1",
+            params![from_playlist_name],
+        )?;
+    }
+    Ok(())
+}
+
+/// Upsert a playlist cache entry. This is called after we resolve a playlist
+/// file to a set of remote URIs so we can return the cached result the next
+/// time the file is unchanged.
+pub fn upsert_playlist_cache(
+    conn: &Connection,
+    playlist_name: &str,
+    file_mtime: i64,
+    file_size: i64,
+    file_hash: &str,
+    uris_json: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO playlist_cache (playlist_name, file_mtime, file_size, file_hash, uris) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(playlist_name) DO UPDATE SET file_mtime = excluded.file_mtime, file_size = excluded.file_size, file_hash = excluded.file_hash, uris = excluded.uris",
+        params![playlist_name, file_mtime, file_size, file_hash, uris_json],
+    )?;
+    Ok(())
+}
+
 fn track_cache_key(provider: &str, local_path: &str) -> String {
     // Keep legacy behavior for Spotify so existing rows remain valid.
     if provider.eq_ignore_ascii_case("spotify") {

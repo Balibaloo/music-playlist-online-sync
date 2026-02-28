@@ -2,6 +2,8 @@ use music_file_playlist_online_sync::db;
 use rusqlite::Connection;
 use tempfile::tempdir;
 use chrono::Utc;
+use std::sync::Arc;
+use async_trait::async_trait;
 
 #[test]
 fn playlist_map_and_track_cache_persistence() {
@@ -39,4 +41,118 @@ fn playlist_map_and_track_cache_persistence() {
     let (_isrc2, rid2, ts2) = neg.unwrap();
     assert!(rid2.is_none());
     assert!((Utc::now().timestamp() - ts2).abs() < 60);
+}
+
+
+#[tokio::test]
+async fn playlist_cache_and_rename_migration() {
+    // set up a temporary root folder with a playlist and a single track
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("root");
+    std::fs::create_dir_all(root.join("foo")).unwrap();
+    std::fs::write(root.join("foo").join("song.mp3"), b"data").unwrap();
+    let playlist_path = root.join("foo").join("foo.m3u");
+    std::fs::write(&playlist_path, "song.mp3\n").unwrap();
+
+    // write minimal config file pointing at the temp root
+    let cfg_file = td.path().join("cfg.toml");
+    let db_file = td.path().join("test.db");
+    std::fs::write(
+        &cfg_file,
+        format!(
+            "root_folder = \"{}\"\ndb_path = \"{}\"\n",
+            root.display(),
+            db_file.display()
+        ),
+    )
+    .unwrap();
+    let cfg = music_file_playlist_online_sync::config::Config::from_path(&cfg_file).unwrap();
+    // ensure the database exists and has the proper tables
+    {
+        let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
+        music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
+    }
+
+    // counting provider to ensure resolution only happens once per file
+    struct CountingProvider(Arc<std::sync::Mutex<usize>>);
+    impl CountingProvider {
+        fn new(counter: Arc<std::sync::Mutex<usize>>) -> Self {
+            Self(counter)
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::api::Provider for CountingProvider {
+        fn name(&self) -> &str {
+            "count"
+        }
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> {
+            Ok("id".to_string())
+        }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+            let mut c = self.0.lock().unwrap();
+            *c += 1;
+            Ok(Some("uri".to_string()))
+        }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
+            // count as well
+            let mut c = self.0.lock().unwrap();
+            *c += 1;
+            Ok(None)
+        }
+    }
+
+    let counter = Arc::new(std::sync::Mutex::new(0));
+    let provider = Arc::new(CountingProvider::new(counter.clone()));
+
+    // first run should populate cache and increment counter
+    let uris1 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone())
+        .await
+        .unwrap();
+    assert_eq!(uris1, vec!["uri".to_string()]);
+    let calls_after_first = *counter.lock().unwrap();
+    assert!(calls_after_first > 0);
+
+    // second run without changing the file should hit cache and not increment
+    let uris2 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone())
+        .await
+        .unwrap();
+    assert_eq!(uris2, uris1);
+    assert_eq!(calls_after_first, *counter.lock().unwrap());
+
+    // migrate/rename the playlist folder on disk and in the database
+    std::fs::rename(root.join("foo"), root.join("bar")).unwrap();
+    // playlist file is now root/bar/bar.m3u (we also rename it to match)
+    std::fs::rename(root.join("bar").join("foo.m3u"), root.join("bar").join("bar.m3u")).unwrap();
+
+    // manually migrate cache entry
+    let conn = rusqlite::Connection::open(cfg.db_path.clone()).unwrap();
+    music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "foo", "bar").unwrap();
+
+    // third run using new logical name should also hit cache (no new provider calls)
+    let uris3 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone())
+        .await
+        .unwrap();
+    assert_eq!(uris3, uris1);
+    assert_eq!(calls_after_first, *counter.lock().unwrap());
 }

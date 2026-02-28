@@ -5,11 +5,15 @@ use crate::db;
 use crate::models::{Event, EventAction};
 use crate::watcher::{compile_whitelist, matches_whitelist};
 use anyhow::{Context, Result};
+use chrono::Utc;
 
 use std::sync::Arc;
 use uuid::Uuid;
 
 const PHASE_WIDTH: usize = 10;
+
+/// negative lookup cache entries are valid for this many seconds (30 days)
+const NEGATIVE_CACHE_TTL_SECS: i64 = 30 * 24 * 3600;
 
 fn log_run_tag(run_id: &str) -> String {
     let short = &run_id[..std::cmp::min(8, run_id.len())];
@@ -99,25 +103,35 @@ async fn desired_remote_uris_for_playlist(
         let local_path_str = local_path.display().to_string();
 
         // First, try the track cache by local path.
+        // lookup existing cache entry (includes resolved_at timestamp)
         let db_path = cfg.db_path.clone();
         let provider_name_for_lookup = provider_name.clone();
         let local_path_for_lookup = local_path_str.clone();
-        let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking(
-            move || -> Result<Option<(Option<String>, Option<String>)>, anyhow::Error> {
-                let conn = rusqlite::Connection::open(db_path)?;
-                Ok(db::get_track_cache_by_local(
-                    &conn,
-                    &provider_name_for_lookup,
-                    &local_path_for_lookup,
-                )?)
-            },
-        )
-        .await??;
+        let cached: Option<(Option<String>, Option<String>, i64)> =
+            tokio::task::spawn_blocking(
+                move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
+                    let conn = rusqlite::Connection::open(db_path)?;
+                    Ok(db::get_track_cache_by_local(
+                        &conn,
+                        &provider_name_for_lookup,
+                        &local_path_for_lookup,
+                    )?)
+                },
+            )
+            .await??;
 
-        if let Some((_cached_isrc, cached_remote_id)) = &cached {
+        if let Some((_cached_isrc, cached_remote_id, resolved_at)) = &cached {
             if let Some(uri) = cached_remote_id {
                 uris.push(uri.clone());
                 continue;
+            } else {
+                // negative cache hit? check TTL
+                let now = Utc::now().timestamp();
+                if now - *resolved_at < NEGATIVE_CACHE_TTL_SECS {
+                    // track previously failed to resolve recently; skip further attempts
+                    continue;
+                }
+                // else fall through and re-query
             }
         }
 
@@ -208,6 +222,23 @@ async fn desired_remote_uris_for_playlist(
                 local_path,
                 provider.name()
             );
+            // record negative result to avoid repeated lookups for a while
+            let db_path = cfg.db_path.clone();
+            let local_path_for_cache = local_path_str.clone();
+            let provider_name_for_cache = provider.name().to_string();
+            let maybe_isrc = extracted.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                let conn = rusqlite::Connection::open(db_path)?;
+                let _ = db::upsert_track_cache(
+                    &conn,
+                    &provider_name_for_cache,
+                    &local_path_for_cache,
+                    maybe_isrc.as_deref(),
+                    None,
+                );
+                Ok(())
+            })
+            .await??;
         }
     }
 
@@ -1214,19 +1245,20 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         continue;
                     }
 
-                    // Try track cache first: reuse previously resolved URI and/or ISRC for this local path
-                    let cached: Option<(Option<String>, Option<String>)> = tokio::task::spawn_blocking({
-                    let db_path = cfg.db_path.clone();
-                    let local_path = tp.clone();
-                    let provider_name = provider.name().to_string();
-                    move || -> Result<Option<(Option<String>, Option<String>)>, anyhow::Error> {
-                        let conn = rusqlite::Connection::open(db_path)?;
-                        Ok(db::get_track_cache_by_local(&conn, &provider_name, &local_path)?)
-                    }
-                })
-                .await??;
+                    // Try track cache first (with timestamp) to avoid unnecessary lookups
+                    let cached: Option<(Option<String>, Option<String>, i64)> =
+                        tokio::task::spawn_blocking({
+                            let db_path = cfg.db_path.clone();
+                            let local_path = tp.clone();
+                            let provider_name = provider.name().to_string();
+                            move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
+                                let conn = rusqlite::Connection::open(db_path)?;
+                                Ok(db::get_track_cache_by_local(&conn, &provider_name, &local_path)?)
+                            }
+                        })
+                        .await??;
 
-                    if let Some((_cached_isrc, cached_remote_id)) = &cached {
+                    if let Some((_cached_isrc, cached_remote_id, resolved_at)) = &cached {
                         if let Some(uri) = cached_remote_id {
                             match act {
                                 EventAction::Add => add_uris.push(uri.clone()),
@@ -1234,12 +1266,18 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                 _ => {}
                             }
                             continue;
+                        } else {
+                            let now = Utc::now().timestamp();
+                            if now - *resolved_at < NEGATIVE_CACHE_TTL_SECS {
+                                // negative hit still fresh
+                                continue;
+                            }
                         }
                     }
 
                     // Try to extract ISRC from local file metadata and perform an ISRC-based search
                     let mut isrc_for_lookup: Option<String> =
-                        cached.as_ref().and_then(|(i, _)| i.clone());
+                        cached.as_ref().and_then(|(i, _, _)| i.clone());
                     if isrc_for_lookup.is_none() {
                         let p = std::path::Path::new(&tp).to_path_buf();
                         let extracted = match tokio::task::spawn_blocking(move || {
@@ -1424,6 +1462,23 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             log_phase_tag("RESOLVE"),
                             tp
                         );
+                        // record negative cache entry so we don't retry soon
+                        let db_path = cfg.db_path.clone();
+                        let local_path_for_cache = tp.clone();
+                        let provider_name_for_cache = provider.name().to_string();
+                        let maybe_isrc = cached.as_ref().and_then(|(i,_,_)| i.clone());
+                        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                            let conn = rusqlite::Connection::open(db_path)?;
+                            let _ = crate::db::upsert_track_cache(
+                                &conn,
+                                &provider_name_for_cache,
+                                &local_path_for_cache,
+                                maybe_isrc.as_deref(),
+                                None,
+                            );
+                            Ok(())
+                        })
+                        .await??;
                     }
                 }
             }

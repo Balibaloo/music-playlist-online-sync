@@ -278,15 +278,18 @@ pub fn get_track_cache_by_local(
     conn: &Connection,
     provider: &str,
     local_path: &str,
-) -> Result<Option<(Option<String>, Option<String>)>> {
+) -> Result<Option<(Option<String>, Option<String>, i64)>> {
+    // Returns (isrc, remote_id, resolved_at) if an entry exists.
     let key = track_cache_key(provider, local_path);
-    let mut stmt =
-        conn.prepare("SELECT isrc, remote_id FROM track_cache WHERE local_path = ?1 LIMIT 1")?;
+    let mut stmt = conn.prepare(
+        "SELECT isrc, remote_id, COALESCE(resolved_at,0) FROM track_cache WHERE local_path = ?1 LIMIT 1",
+    )?;
     let row = stmt
         .query_row(params![key], |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?,
                 r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
             ))
         })
         .optional()?;

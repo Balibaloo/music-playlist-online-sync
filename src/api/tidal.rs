@@ -276,11 +276,9 @@ impl TidalProvider {
                 log::debug!("Tidal token near expiry, attempting refresh");
                 // attempt refresh if refresh_token present
                 let mut cur = st.clone();
-                if let Err(e) = self.refresh_token_internal(&mut cur).await {
-                    log::warn!("Tidal token refresh failed: {}", e);
-                } else {
-                    *lock = Some(cur);
-                }
+                // propagate errors so callers (and tests) notice failures
+                self.refresh_token_internal(&mut cur).await?;
+                *lock = Some(cur);
             }
         }
         Ok(())
@@ -367,6 +365,11 @@ impl TidalProvider {
         }
         self.persist_token_to_db(cur).await?;
         Ok(())
+    }
+
+    /// expose credentials for tests
+    pub fn creds(&self) -> (&str, &str) {
+        (self.client_id.as_str(), self.client_secret.as_str())
     }
 
     pub async fn get_bearer(&self) -> Result<String> {

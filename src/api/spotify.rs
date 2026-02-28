@@ -219,6 +219,11 @@ impl SpotifyProvider {
         "spotify"
     }
 
+    /// Return the currently configured client credentials (for tests).
+    pub fn creds(&self) -> (&str, &str) {
+        (self.client_id.as_str(), self.client_secret.as_str())
+    }
+
     fn auth_base() -> String {
         env::var("SPOTIFY_AUTH_BASE").unwrap_or_else(|_| "https://accounts.spotify.com".into())
     }

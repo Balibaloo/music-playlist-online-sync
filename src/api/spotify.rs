@@ -31,6 +31,9 @@ pub struct SpotifyProvider {
     config: crate::config::Config,
     token: tokio::sync::Mutex<Option<StoredToken>>,
     user_id: tokio::sync::Mutex<Option<String>>,
+    /// Cached result of `list_user_playlists()` so we only fetch the full
+    /// library once per worker run instead of once per playlist.
+    playlist_cache: tokio::sync::Mutex<Option<Vec<(String, String)>>>,
 }
 
 impl SpotifyProvider {
@@ -110,8 +113,19 @@ impl SpotifyProvider {
         uris.retain(|u| seen.insert(u.clone()));
         Ok(uris)
     }
-    /// List all playlists for the authenticated user
+    /// List all playlists for the authenticated user.
+    /// Results are cached for the lifetime of the provider instance so that
+    /// multiple callers within a single worker run do not re-fetch the entire
+    /// Spotify library each time.
     pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
+        // Fast path: return cached result if available.
+        {
+            let cache = self.playlist_cache.lock().await;
+            if let Some(ref cached) = *cache {
+                return Ok(cached.clone());
+            }
+        }
+
         let user_id = self.get_user_id().await?;
         let mut playlists = Vec::new();
         let mut next_url = Some(format!(
@@ -138,7 +152,41 @@ impl SpotifyProvider {
             }
             next_url = j["next"].as_str().map(|s| s.to_string());
         }
+
+        // Store in cache so subsequent calls within this worker run are free.
+        {
+            let mut cache = self.playlist_cache.lock().await;
+            *cache = Some(playlists.clone());
+        }
         Ok(playlists)
+    }
+
+    /// Update the cached name for an existing playlist after a rename,
+    /// avoiding a full re-fetch of the user's library.
+    async fn cache_update_name(&self, playlist_id: &str, new_name: &str) {
+        let mut cache = self.playlist_cache.lock().await;
+        if let Some(ref mut entries) = *cache {
+            if let Some(entry) = entries.iter_mut().find(|(id, _)| id == playlist_id) {
+                entry.1 = new_name.to_string();
+            }
+        }
+    }
+
+    /// Add a newly-created playlist to the cache so that subsequent calls
+    /// to `list_user_playlists` see it without a round-trip.
+    async fn cache_add_entry(&self, playlist_id: &str, name: &str) {
+        let mut cache = self.playlist_cache.lock().await;
+        if let Some(ref mut entries) = *cache {
+            entries.push((playlist_id.to_string(), name.to_string()));
+        }
+    }
+
+    /// Remove a deleted playlist from the cache.
+    async fn cache_remove_entry(&self, playlist_id: &str) {
+        let mut cache = self.playlist_cache.lock().await;
+        if let Some(ref mut entries) = *cache {
+            entries.retain(|(id, _)| id != playlist_id);
+        }
     }
     pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf, config: crate::config::Config) -> Self {
         // If either client_id or client_secret is empty, try to load from DB
@@ -168,6 +216,7 @@ impl SpotifyProvider {
             config,
             token: tokio::sync::Mutex::new(None),
             user_id: tokio::sync::Mutex::new(None),
+            playlist_cache: tokio::sync::Mutex::new(None),
         }
     }
     fn is_authenticated(&self) -> bool {
@@ -384,6 +433,10 @@ impl Provider for SpotifyProvider {
             .as_str()
             .ok_or_else(|| anyhow!("no id"))?
             .to_string();
+
+        // A new playlist was created – add it to the cache.
+        self.cache_add_entry(&id, name).await;
+
         Ok(id)
     }
 
@@ -396,6 +449,7 @@ impl Provider for SpotifyProvider {
         if !resp.status().is_success() {
             return Err(anyhow!("rename failed: {}", resp.status()));
         }
+        self.cache_update_name(playlist_id, new_name).await;
         Ok(())
     }
 
@@ -438,6 +492,7 @@ impl Provider for SpotifyProvider {
         if !resp.status().is_success() {
             return Err(anyhow!("delete playlist failed: {}", resp.status()));
         }
+        self.cache_remove_entry(playlist_id).await;
         Ok(())
     }
 

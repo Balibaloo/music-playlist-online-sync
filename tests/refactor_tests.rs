@@ -135,9 +135,20 @@ impl Provider for FailingProvider {
     async fn list_playlist_tracks(&self, _id: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
-    async fn playlist_is_valid(&self, _id: &str) -> anyhow::Result<bool> { Ok(true) }
+    async fn playlist_is_valid(&self, _id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
     async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
+    }
+    fn http_client(&self) -> &reqwest::Client {
+        use std::sync::OnceLock;
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(reqwest::Client::new)
+    }
+    async fn get_bearer(&self) -> anyhow::Result<String> {
+        Ok("Bearer test".to_string())
+    }
+    async fn refresh_token(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

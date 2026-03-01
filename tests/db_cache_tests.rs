@@ -157,8 +157,8 @@ async fn playlist_cache_and_rename_migration() {
         async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> {
-            Ok(true)
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(String::new()))
         }
         async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
             // count as well
@@ -166,13 +166,24 @@ async fn playlist_cache_and_rename_migration() {
             *c += 1;
             Ok(None)
         }
+        fn http_client(&self) -> &reqwest::Client {
+            use std::sync::OnceLock;
+            static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+            CLIENT.get_or_init(reqwest::Client::new)
+        }
+        async fn get_bearer(&self) -> anyhow::Result<String> {
+            Ok("Bearer test".to_string())
+        }
+        async fn refresh_token(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     let counter = Arc::new(std::sync::Mutex::new(0));
     let provider = Arc::new(CountingProvider::new(counter.clone()));
 
     // first run should populate cache and increment counter
-    let uris1 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool)
+    let uris1 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
         .await
         .unwrap();
     assert_eq!(uris1, vec!["uri".to_string()]);
@@ -180,7 +191,7 @@ async fn playlist_cache_and_rename_migration() {
     assert!(calls_after_first > 0);
 
     // second run without changing the file should hit cache and not increment
-    let uris2 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool)
+    let uris2 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
         .await
         .unwrap();
     assert_eq!(uris2, uris1);
@@ -193,10 +204,10 @@ async fn playlist_cache_and_rename_migration() {
 
     // manually migrate cache entry
     let conn = rusqlite::Connection::open(cfg.db_path.clone()).unwrap();
-    music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "foo", "bar").unwrap();
+    music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "count", "foo", "bar").unwrap();
 
     // third run using new logical name should also hit cache (no new provider calls)
-    let uris3 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone(), &pool)
+    let uris3 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone(), &pool, false)
         .await
         .unwrap();
     assert_eq!(uris3, uris1);
@@ -274,11 +285,22 @@ async fn skip_resolve_when_track_ops() {
             Ok(Some("uri".to_string()))
         }
         async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> { Ok(true) }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
         async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
             Ok(None)
+        }
+        fn http_client(&self) -> &reqwest::Client {
+            use std::sync::OnceLock;
+            static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+            CLIENT.get_or_init(reqwest::Client::new)
+        }
+        async fn get_bearer(&self) -> anyhow::Result<String> {
+            Ok("Bearer test".to_string())
+        }
+        async fn refresh_token(&self) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 
@@ -294,7 +316,7 @@ async fn skip_resolve_when_track_ops() {
     let mut reconcile_desired: Option<Vec<String>> = None;
     if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
         // would call `desired_remote_uris_for_playlist` here
-        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool).await;
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false).await;
         reconcile_desired = Some(Vec::new());
     }
 
@@ -349,8 +371,19 @@ async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
             Ok(None)
         }
         async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> { Ok(true) }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
         async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> { Ok(None) }
+        fn http_client(&self) -> &reqwest::Client {
+            use std::sync::OnceLock;
+            static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+            CLIENT.get_or_init(reqwest::Client::new)
+        }
+        async fn get_bearer(&self) -> anyhow::Result<String> {
+            Ok("Bearer test".to_string())
+        }
+        async fn refresh_token(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     let provider = Arc::new(DummyProvider);
@@ -499,11 +532,22 @@ async fn skip_resolve_on_rename_only() {
             Ok(Some("uri".to_string()))
         }
         async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<bool> { Ok(true) }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
         async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
             Ok(None)
+        }
+        fn http_client(&self) -> &reqwest::Client {
+            use std::sync::OnceLock;
+            static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+            CLIENT.get_or_init(reqwest::Client::new)
+        }
+        async fn get_bearer(&self) -> anyhow::Result<String> {
+            Ok("Bearer test".to_string())
+        }
+        async fn refresh_token(&self) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 
@@ -516,7 +560,7 @@ async fn skip_resolve_on_rename_only() {
 
     let mut reconcile_desired: Option<Vec<String>> = None;
     if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
-        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool).await;
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false).await;
         reconcile_desired = Some(Vec::new());
     }
 

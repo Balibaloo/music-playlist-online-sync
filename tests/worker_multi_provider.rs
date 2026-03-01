@@ -83,3 +83,5 @@ async fn test_worker_with_mock_and_real_providers() {
     db::run_migrations(&conn).unwrap();
     // Should not panic or process events
     let result = run_worker_once(&cfg, false).await;
+    assert!(result.is_ok());
+}

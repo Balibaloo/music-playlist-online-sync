@@ -1,11 +1,11 @@
-use super::Provider;
+use super::{Provider, RequestSpec};
 use crate::db;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::Utc;
 use log;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::AUTHORIZATION;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -53,7 +53,8 @@ impl TidalProvider {
                 return Ok(cached.clone());
             }
         }
-        let bearer = self.get_bearer().await?;
+        // Ensure the token is loaded so that user_id can be read from it.
+        self.ensure_token().await?;
         let base = Self::base_url();
 
         // Require explicit numeric user id from the stored token; this is
@@ -72,17 +73,13 @@ impl TidalProvider {
         let locale = Self::locale();
         // First page: v2 userCollections with include=playlists, which
         // returns playlist resources in `included` and a relationship with
-        // pagination links. Request a higher page size to reduce the
-        // number of follow-up requests TIDAL needs to serve.
+        // pagination links.
         let url = format!(
             "{}/userCollections/{}?countryCode={}&locale={}&include=playlists&page[limit]=100",
             base, user_id, cc, locale
         );
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("list_user_playlists", &RequestSpec::get(&url))
             .await?;
         let status = resp.status();
         if !status.is_success() {
@@ -91,7 +88,6 @@ impl TidalProvider {
         }
         let j: serde_json::Value = resp.json().await?;
 
-        use std::collections::HashMap;
         let mut by_id: HashMap<String, String> = HashMap::new();
 
         if let Some(included) = j["included"].as_array() {
@@ -123,10 +119,7 @@ impl TidalProvider {
                 format!("{}{}", base, next_path)
             };
             let resp = self
-                .client
-                .get(&rel_url)
-                .header(AUTHORIZATION, &bearer)
-                .send()
+                .execute_request("list_user_playlists/page", &RequestSpec::get(&rel_url))
                 .await?;
             if !resp.status().is_success() {
                 break;
@@ -143,10 +136,7 @@ impl TidalProvider {
                                 let pl_url =
                                     format!("{}/playlists/{}?countryCode={}", base, id, cc);
                                 let pl_resp = self
-                                    .client
-                                    .get(&pl_url)
-                                    .header(AUTHORIZATION, &bearer)
-                                    .send()
+                                    .execute_request("list_user_playlists/item", &RequestSpec::get(&pl_url))
                                     .await?;
                                 if !pl_resp.status().is_success() {
                                     continue;
@@ -446,7 +436,6 @@ impl TidalProvider {
         }
 
         let base = Self::base_url();
-        let bearer = self.get_bearer().await?;
         let cc = Self::country_code();
         let mut next_url = format!(
             "{}/playlists/{}/relationships/items?countryCode={}",
@@ -455,18 +444,10 @@ impl TidalProvider {
 
         loop {
             let resp = self
-                .client
-                .get(&next_url)
-                .header(AUTHORIZATION, &bearer)
-                .send()
+                .execute_request("resolve_playlist_item_ids", &RequestSpec::get(&next_url))
                 .await?;
 
             let status = resp.status();
-            if status == reqwest::StatusCode::NOT_FOUND {
-                // TIDAL returns 404 for playlists with no items; treat
-                // that as an empty result.
-                return Ok(result);
-            }
             if !status.is_success() {
                 let txt = resp.text().await.unwrap_or_default();
                 return Err(anyhow!(
@@ -675,17 +656,13 @@ impl TidalProvider {
         }
 
         let base = Self::base_url();
-        let bearer = self.get_bearer().await?;
 
         // Best-effort: try to find an existing folder with this name.
         // The API currently does not expose a direct name filter, so we
         // retrieve folders and match client-side on attributes.name.
         let list_url = format!("{}/userCollectionFolders", base);
         if let Ok(resp) = self
-            .client
-            .get(&list_url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("ensure_root_folder/list", &RequestSpec::get(&list_url))
             .await
         {
             if resp.status().is_success() {
@@ -721,12 +698,10 @@ impl TidalProvider {
         });
 
         let resp = self
-            .client
-            .post(&create_url)
-            .header(AUTHORIZATION, &bearer)
-            // .header(CONTENT_TYPE, "application/vnd.api+json")
-            .json(&body)
-            .send()
+            .execute_request(
+                "ensure_root_folder/create",
+                &RequestSpec::post(&create_url).json(body),
+            )
             .await?;
 
         let status = resp.status();
@@ -762,7 +737,6 @@ impl TidalProvider {
         };
 
         let base = Self::base_url();
-        let bearer = self.get_bearer().await?;
         let url = format!(
             "{}/userCollectionFolders/{}/relationships/items",
             base, folder_id
@@ -772,12 +746,12 @@ impl TidalProvider {
         });
 
         let resp = self
-            .client
-            .post(&url)
-            .header(AUTHORIZATION, &bearer)
-            .header(CONTENT_TYPE, "application/vnd.api+json")
-            .json(&body)
-            .send()
+            .execute_request(
+                "add_playlist_to_root_folder",
+                &RequestSpec::post(&url)
+                    .json(body)
+                    .header("content-type", "application/vnd.api+json"),
+            )
             .await?;
 
         let status = resp.status();
@@ -797,6 +771,27 @@ impl TidalProvider {
 
 #[async_trait]
 impl Provider for TidalProvider {
+    fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+    async fn get_bearer(&self) -> Result<String> {
+        TidalProvider::get_bearer(self).await
+    }
+    async fn refresh_token(&self) -> Result<()> {
+        // Force-refresh the access token regardless of expiry, e.g. after a 401.
+        let mut lock = self.token.lock().await;
+        if lock.is_none() {
+            if let Some(st) = self.load_token_from_db().await? {
+                *lock = Some(st);
+            }
+        }
+        if let Some(st) = &*lock {
+            let mut cur = st.clone();
+            self.refresh_token_internal(&mut cur).await?;
+            *lock = Some(cur);
+        }
+        Ok(())
+    }
     fn name(&self) -> &str {
         TidalProvider::name(self)
     }
@@ -878,75 +873,48 @@ impl Provider for TidalProvider {
                 }
             }
         });
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            let bearer = self.get_bearer().await?;
-            let resp = self
-                .client
-                .post(&url)
-                .header(AUTHORIZATION, &bearer)
-                .header(CONTENT_TYPE, "application/vnd.tidal.v1+json")
-                .json(&body)
-                .send()
-                .await?;
-            let status = resp.status();
-
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt <= 3 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(2);
-                let sleep_secs = retry_after + 1;
-                log::info!(
-                    "TidalProvider ensure_playlist rate limited for playlist '{}' – sleeping {} seconds",
-                    name,
-                    sleep_secs
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-                continue;
-            }
-
-            if !status.is_success() {
-                let txt = resp.text().await.unwrap_or_default();
-                return Err(anyhow!(
-                    "tidal create playlist failed: {} => {}",
-                    status,
-                    txt
-                ));
-            }
-            let j: serde_json::Value = resp.json().await?;
-            // Tidal JSON:API responses return id under data.id
-            let id = j
-                .get("data")
-                .and_then(|d| d.get("id"))
-                .and_then(|v| v.as_str())
-                // Fallbacks for older/undocumented shapes
-                .or_else(|| j.get("uuid").and_then(|v| v.as_str()))
-                .or_else(|| j.get("id").and_then(|v| v.as_str()))
-                .ok_or_else(|| anyhow!("no playlist id in response"))?;
-            let id_str = id.to_string();
-
-            // A new playlist was created – add it to the cache.
-            self.cache_add_entry(&id_str, name).await;
-
-            // If a logical root folder is configured, best-effort add this
-            // playlist under that folder so that all app-created playlists
-            // appear grouped together in the user's TIDAL UI.
-            if self.root_folder().is_some() {
-                if let Err(e) = self.add_playlist_to_root_folder(&id_str).await {
-                    log::warn!(
-                        "Failed to attach playlist {} to TIDAL root folder: {}",
-                        id_str,
-                        e
-                    );
-                }
-            }
-
-            return Ok(id_str);
+        let spec = RequestSpec::post(&url)
+            .json(body)
+            .header("content-type", "application/vnd.tidal.v1+json");
+        let resp = self.execute_request("ensure_playlist", &spec).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "tidal create playlist failed: {} => {}",
+                status,
+                txt
+            ));
         }
+        let j: serde_json::Value = resp.json().await?;
+        // Tidal JSON:API responses return id under data.id
+        let id = j
+            .get("data")
+            .and_then(|d| d.get("id"))
+            .and_then(|v| v.as_str())
+            // Fallbacks for older/undocumented shapes
+            .or_else(|| j.get("uuid").and_then(|v| v.as_str()))
+            .or_else(|| j.get("id").and_then(|v| v.as_str()))
+            .ok_or_else(|| anyhow!("no playlist id in response"))?;
+        let id_str = id.to_string();
+
+        // A new playlist was created – add it to the cache.
+        self.cache_add_entry(&id_str, name).await;
+
+        // If a logical root folder is configured, best-effort add this
+        // playlist under that folder so that all app-created playlists
+        // appear grouped together in the user's TIDAL UI.
+        if self.root_folder().is_some() {
+            if let Err(e) = self.add_playlist_to_root_folder(&id_str).await {
+                log::warn!(
+                    "Failed to attach playlist {} to TIDAL root folder: {}",
+                    id_str,
+                    e
+                );
+            }
+        }
+
+        return Ok(id_str);
     }
 
     async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<()> {
@@ -968,48 +936,20 @@ impl Provider for TidalProvider {
                 }
             }
         });
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            let bearer = self.get_bearer().await?;
-            let resp = self
-                .client
-                .patch(&url)
-                .header(AUTHORIZATION, &bearer)
-                .header(CONTENT_TYPE, "application/vnd.tidal.v1+json")
-                .json(&body)
-                .send()
-                .await?;
-            let status = resp.status();
-
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt <= 3 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(2);
-                let sleep_secs = retry_after + 1;
-                log::info!(
-                    "TidalProvider rename_playlist rate limited for id {} – sleeping {} seconds",
-                    playlist_id,
-                    sleep_secs
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-                continue;
-            }
-
-            if !status.is_success() {
-                let txt = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("tidal rename failed: {} => {}", status, txt));
-            }
-            self.cache_update_name(playlist_id, new_name).await;
-            return Ok(());
+        let spec = RequestSpec::patch(&url)
+            .json(body)
+            .header("content-type", "application/vnd.tidal.v1+json");
+        let resp = self.execute_request("rename_playlist", &spec).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("tidal rename failed: {} => {}", status, txt));
         }
+        self.cache_update_name(playlist_id, new_name).await;
+        Ok(())
     }
 
     async fn add_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
-        let bearer = self.get_bearer().await?;
         let base = Self::base_url();
         // JSON:API relationship endpoint: POST /playlists/{id}/relationships/items
         let url = format!(
@@ -1056,22 +996,10 @@ impl Provider for TidalProvider {
             return Ok(());
         }
         let body = json!({ "data": data });
-        let resp = self
-            .client
-            .post(&url)
-            .header(AUTHORIZATION, &bearer)
-            .header(CONTENT_TYPE, "application/vnd.tidal.v1+json")
-            .json(&body)
-            .send()
-            .await?;
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
-        }
+        let spec = RequestSpec::post(&url)
+            .json(body)
+            .header("content-type", "application/vnd.tidal.v1+json");
+        let resp = self.execute_request("add_tracks", &spec).await?;
         let status = resp.status();
         if !status.is_success() {
             let txt = resp.text().await.unwrap_or_default();
@@ -1136,7 +1064,6 @@ impl Provider for TidalProvider {
             return Ok(());
         }
 
-        let bearer = self.get_bearer().await?;
         // JSON:API relationship endpoint for deleting items.
         let url = format!(
             "{}/playlists/{}/relationships/items?countryCode={}",
@@ -1151,22 +1078,10 @@ impl Provider for TidalProvider {
         const TIDAL_DELETE_MAX: usize = 20;
         for chunk in data.chunks(TIDAL_DELETE_MAX) {
             let body = json!({ "data": chunk });
-            let resp = self
-                .client
-                .delete(&url)
-                .header(AUTHORIZATION, &bearer)
-                .header(CONTENT_TYPE, "application/vnd.tidal.v1+json")
-                .json(&body)
-                .send()
-                .await?;
-            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok());
-                return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
-            }
+            let spec = RequestSpec::delete(&url)
+                .json(body)
+                .header("content-type", "application/vnd.tidal.v1+json");
+            let resp = self.execute_request("remove_tracks", &spec).await?;
             let status = resp.status();
             if !status.is_success() {
                 let txt = resp.text().await.unwrap_or_default();
@@ -1177,7 +1092,6 @@ impl Provider for TidalProvider {
     }
 
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>> {
-        let bearer = self.get_bearer().await?;
         let base = Self::base_url();
         let q = format!("{} {}", title, artist);
         let url = format!(
@@ -1187,10 +1101,7 @@ impl Provider for TidalProvider {
             Self::country_code()
         );
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("search_track_uri", &RequestSpec::get(&url))
             .await?;
         if !resp.status().is_success() {
             return Ok(None);
@@ -1218,7 +1129,6 @@ impl Provider for TidalProvider {
     }
 
     async fn search_track_uri_by_isrc(&self, isrc: &str) -> Result<Option<String>> {
-        let bearer = self.get_bearer().await?;
         let base = Self::base_url();
         // Use the dedicated ISRC filter endpoint, e.g.:
         //   /tracks?countryCode=US&filter%5Bisrc%5D=DEVF11900580
@@ -1230,10 +1140,7 @@ impl Provider for TidalProvider {
             isrc
         );
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("search_track_uri_by_isrc", &RequestSpec::get(&url))
             .await?;
         if !resp.status().is_success() {
             return Ok(None);
@@ -1267,12 +1174,8 @@ impl Provider for TidalProvider {
         let base = Self::base_url();
         let cc = Self::country_code();
         let url = format!("{}/tracks/{}?countryCode={}", base, id, cc);
-        let bearer = self.get_bearer().await?;
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("lookup_track_isrc", &RequestSpec::get(&url))
             .await?;
         if !resp.status().is_success() {
             return Ok(None);
@@ -1287,7 +1190,6 @@ impl Provider for TidalProvider {
     }
 
     async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
-        let bearer = self.get_bearer().await?;
         let base = Self::base_url();
         let url = format!(
             "{}/playlists/{}?countryCode={}",
@@ -1296,10 +1198,7 @@ impl Provider for TidalProvider {
             Self::country_code()
         );
         let resp = self
-            .client
-            .delete(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("delete_playlist", &RequestSpec::delete(&url))
             .await?;
         let status = resp.status();
         if !status.is_success() {

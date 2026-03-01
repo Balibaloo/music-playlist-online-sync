@@ -52,6 +52,17 @@ impl Provider for TestProvider {
     fn is_authenticated(&self) -> bool {
         true
     }
+    fn http_client(&self) -> &reqwest::Client {
+        use std::sync::OnceLock;
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(reqwest::Client::new)
+    }
+    async fn get_bearer(&self) -> anyhow::Result<String> {
+        Ok("Bearer test".to_string())
+    }
+    async fn refresh_token(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

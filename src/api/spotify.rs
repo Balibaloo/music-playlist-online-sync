@@ -1,11 +1,11 @@
-use super::Provider;
+use super::{Provider, RequestSpec};
 use crate::db;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
-use log::{debug, warn};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use log::debug;
+use reqwest::header::AUTHORIZATION;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -38,10 +38,7 @@ impl SpotifyProvider {
     /// was "deleted" (unfollowed) in the Spotify client while our
     /// local mapping still points at the old id.
     async fn playlist_is_accessible(&self, playlist_id: &str) -> Result<Option<String>> {
-        // First, check whether the playlist id is still visible in the
-        // current user's playlist library. This matches what the user sees
-        // in the Spotify UI: if they've "deleted" (unfollowed) the playlist,
-        // it will no longer appear in /users/{id}/playlists.
+        // Check whether the playlist is still visible in the user's library.
         let playlists = self.list_user_playlists().await?;
         let found = playlists.iter().find(|(id, _name)| id == playlist_id);
         let current_name = match found {
@@ -55,51 +52,16 @@ impl SpotifyProvider {
             }
         };
 
-        // As an extra safety check, confirm the playlist is still accessible
-        // via the generic playlist endpoint.
-        let bearer = self.get_bearer().await?;
+        // Extra safety: confirm accessibility via the single-playlist endpoint.
+        // execute_request handles 401 (token refresh) and 429 (rate limit) automatically.
         let url = format!("{}/playlists/{}", Self::api_base(), playlist_id);
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("playlist_is_accessible", &RequestSpec::get(&url))
             .await?;
         let status = resp.status();
         if status.is_success() {
             return Ok(Some(current_name));
         }
-        if status.as_u16() == 401 {
-            // Try once more after refreshing token.
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self
-                .client
-                .get(&url)
-                .header(AUTHORIZATION, &bearer2)
-                .send()
-                .await?;
-            let st2 = resp2.status();
-            if st2.is_success() {
-                return Ok(Some(current_name));
-            }
-            // 404/403 after refresh -> treat as invalid mapping.
-            if st2 == reqwest::StatusCode::NOT_FOUND || st2 == reqwest::StatusCode::FORBIDDEN {
-                debug!(
-                    "Spotify playlist {} not accessible after refresh (status {}); treating as invalid",
-                    playlist_id,
-                    st2
-                );
-                return Ok(None);
-            }
-            return Err(anyhow!(
-                "playlist_is_accessible failed after refresh: {}",
-                st2
-            ));
-        }
-
-        // 404/403 without needing refresh means the playlist either no
-        // longer exists or the user no longer has access to it.
         if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
             debug!(
                 "Spotify playlist {} not accessible (status {}); treating as invalid",
@@ -107,7 +69,6 @@ impl SpotifyProvider {
             );
             return Ok(None);
         }
-
         Err(anyhow!("playlist_is_accessible failed: {}", status))
     }
     /// List all track URIs for a given Spotify playlist.
@@ -120,12 +81,8 @@ impl SpotifyProvider {
         ));
 
         while let Some(url) = next {
-            let bearer = self.get_bearer().await?;
             let resp = self
-                .client
-                .get(&url)
-                .header(AUTHORIZATION, &bearer)
-                .send()
+                .execute_request("list_playlist_tracks", &RequestSpec::get(&url))
                 .await?;
             let status = resp.status();
             if !status.is_success() {
@@ -155,7 +112,6 @@ impl SpotifyProvider {
     /// List all playlists for the authenticated user
     pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
         let user_id = self.get_user_id().await?;
-        let bearer = self.get_bearer().await?;
         let mut playlists = Vec::new();
         let mut next_url = Some(format!(
             "{}/users/{}/playlists?limit=50",
@@ -164,10 +120,7 @@ impl SpotifyProvider {
         ));
         while let Some(url) = next_url {
             let resp = self
-                .client
-                .get(&url)
-                .header(AUTHORIZATION, &bearer)
-                .send()
+                .execute_request("list_user_playlists", &RequestSpec::get(&url))
                 .await?;
             let status = resp.status();
             if !status.is_success() {
@@ -353,36 +306,10 @@ impl SpotifyProvider {
                 return Ok(u.clone());
             }
         }
-        let bearer = self.get_bearer().await?;
         let url = format!("{}/me", Self::api_base());
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("get_user_id", &RequestSpec::get(&url))
             .await?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            warn!("Got 401 when fetching /me; attempting token refresh");
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self
-                .client
-                .get(&url)
-                .header(AUTHORIZATION, &bearer2)
-                .send()
-                .await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow!("failed to fetch /me: {}", resp2.status()));
-            }
-            let j: serde_json::Value = resp2.json().await?;
-            let id = j["id"]
-                .as_str()
-                .ok_or_else(|| anyhow!("no id"))?
-                .to_string();
-            let mut g = self.user_id.lock().await;
-            *g = Some(id.clone());
-            return Ok(id);
-        }
         if !resp.status().is_success() {
             return Err(anyhow!("failed to fetch /me: {}", resp.status()));
         }
@@ -399,6 +326,27 @@ impl SpotifyProvider {
 
 #[async_trait]
 impl Provider for SpotifyProvider {
+    fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+    async fn get_bearer(&self) -> Result<String> {
+        SpotifyProvider::get_bearer(self).await
+    }
+    async fn refresh_token(&self) -> Result<()> {
+        // Force-refresh the access token regardless of expiry, e.g. after a 401.
+        let mut lock = self.token.lock().await;
+        if lock.is_none() {
+            if let Some(st) = self.load_token_from_db().await? {
+                *lock = Some(st);
+            }
+        }
+        if let Some(st) = &*lock {
+            let mut cur = st.clone();
+            self.refresh_token_internal(&mut cur).await?;
+            *lock = Some(cur);
+        }
+        Ok(())
+    }
     fn name(&self) -> &str {
         SpotifyProvider::name(self)
     }
@@ -407,7 +355,6 @@ impl Provider for SpotifyProvider {
     }
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
         let user_id = self.get_user_id().await?;
-        let bearer = self.get_bearer().await?;
         let url = format!(
             "{}/users/{}/playlists",
             Self::api_base(),
@@ -418,35 +365,10 @@ impl Provider for SpotifyProvider {
             "description": description,
             "public": false
         });
-        let resp = self
-            .client
-            .post(&url)
-            .header(AUTHORIZATION, &bearer)
-            .header(CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-            .await?;
-        if resp.status().as_u16() == 401 {
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self
-                .client
-                .post(&url)
-                .header(AUTHORIZATION, &bearer2)
-                .header(CONTENT_TYPE, "application/json")
-                .json(&body)
-                .send()
-                .await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow!("create playlist failed: {}", resp2.status()));
-            }
-            let j: serde_json::Value = resp2.json().await?;
-            let id = j["id"]
-                .as_str()
-                .ok_or_else(|| anyhow!("no id"))?
-                .to_string();
-            return Ok(id);
-        }
+        let spec = RequestSpec::post(&url)
+            .json(body)
+            .header("content-type", "application/json");
+        let resp = self.execute_request("ensure_playlist", &spec).await?;
         let status = resp.status();
         if !status.is_success() {
             let txt = resp.text().await.unwrap_or_default();
@@ -463,83 +385,21 @@ impl Provider for SpotifyProvider {
     async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<()> {
         let url = format!("{}/playlists/{}", Self::api_base(), playlist_id);
         let body = json!({ "name": new_name });
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            let bearer = self.get_bearer().await?;
-            let resp = self
-                .client
-                .put(&url)
-                .header(AUTHORIZATION, &bearer)
-                .json(&body)
-                .send()
-                .await?;
-            let status = resp.status();
-
-            if status.as_u16() == 401 && attempt == 1 {
-                // Refresh token once on 401, then retry.
-                self.ensure_token().await?;
-                continue;
-            }
-
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt <= 3 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(2);
-                let sleep_secs = retry_after + 1;
-                log::info!(
-                    "SpotifyProvider rename_playlist rate limited for playlist {} – sleeping {} seconds",
-                    playlist_id,
-                    sleep_secs
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
-                continue;
-            }
-
-            if !status.is_success() {
-                return Err(anyhow!("rename failed: {}", status));
-            }
-            return Ok(());
+        let resp = self
+            .execute_request("rename_playlist", &RequestSpec::put(&url).json(body))
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("rename failed: {}", resp.status()));
         }
+        Ok(())
     }
 
     async fn add_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
-        let bearer = self.get_bearer().await?;
         let url = format!("{}/playlists/{}/tracks", Self::api_base(), playlist_id);
         let body = json!({ "uris": uris });
         let resp = self
-            .client
-            .post(&url)
-            .header(AUTHORIZATION, &bearer)
-            .json(&body)
-            .send()
+            .execute_request("add_tracks", &RequestSpec::post(&url).json(body))
             .await?;
-        if resp.status().as_u16() == 401 {
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self
-                .client
-                .post(&url)
-                .header(AUTHORIZATION, &bearer2)
-                .json(&body)
-                .send()
-                .await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow!("add tracks failed: {}", resp2.status()));
-            }
-            return Ok(());
-        }
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
-        }
         let status = resp.status();
         if !status.is_success() {
             let txt = resp.text().await.unwrap_or_default();
@@ -549,40 +409,12 @@ impl Provider for SpotifyProvider {
     }
 
     async fn remove_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
-        let bearer = self.get_bearer().await?;
         let url = format!("{}/playlists/{}/tracks", Self::api_base(), playlist_id);
         let tracks: Vec<serde_json::Value> = uris.iter().map(|u| json!({ "uri": u })).collect();
         let body = json!({ "tracks": tracks });
         let resp = self
-            .client
-            .delete(&url)
-            .header(AUTHORIZATION, &bearer)
-            .json(&body)
-            .send()
+            .execute_request("remove_tracks", &RequestSpec::delete(&url).json(body))
             .await?;
-        if resp.status().as_u16() == 401 {
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self
-                .client
-                .delete(&url)
-                .header(AUTHORIZATION, &bearer2)
-                .json(&body)
-                .send()
-                .await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow!("remove tracks failed: {}", resp2.status()));
-            }
-            return Ok(());
-        }
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
-        }
         let status = resp.status();
         if !status.is_success() {
             let txt = resp.text().await.unwrap_or_default();
@@ -593,31 +425,11 @@ impl Provider for SpotifyProvider {
 
     async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
         // Spotify does not support hard-deleting playlists; instead, the
-        // current user "unfollows" the playlist, which effectively removes
-        // it from their library. The documented endpoint is:
-        // DELETE /playlists/{playlist_id}/followers
-        let bearer = self.get_bearer().await?;
+        // current user "unfollows" the playlist (DELETE /playlists/{id}/followers).
         let url = format!("{}/playlists/{}/followers", Self::api_base(), playlist_id);
         let resp = self
-            .client
-            .delete(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("delete_playlist", &RequestSpec::delete(&url))
             .await?;
-        if resp.status().as_u16() == 401 {
-            self.ensure_token().await?;
-            let bearer2 = self.get_bearer().await?;
-            let resp2 = self
-                .client
-                .delete(&url)
-                .header(AUTHORIZATION, &bearer2)
-                .send()
-                .await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow!("delete playlist failed: {}", resp2.status()));
-            }
-            return Ok(());
-        }
         if !resp.status().is_success() {
             return Err(anyhow!("delete playlist failed: {}", resp.status()));
         }
@@ -639,13 +451,8 @@ impl Provider for SpotifyProvider {
             Self::api_base(),
             urlencoding::encode(&q)
         );
-        let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &self.get_bearer().await?)
-            .header(ACCEPT, "application/json")
-            .send()
-            .await?;
+        let spec = RequestSpec::get(&url).header("accept", "application/json");
+        let resp = self.execute_request("search_track_uri", &spec).await?;
         if !resp.status().is_success() {
             return Ok(None);
         }
@@ -665,13 +472,8 @@ impl Provider for SpotifyProvider {
             Self::api_base(),
             urlencoding::encode(&q)
         );
-        let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &self.get_bearer().await?)
-            .header(ACCEPT, "application/json")
-            .send()
-            .await?;
+        let spec = RequestSpec::get(&url).header("accept", "application/json");
+        let resp = self.execute_request("search_track_uri_by_isrc", &spec).await?;
         if !resp.status().is_success() {
             return Ok(None);
         }
@@ -696,12 +498,8 @@ impl Provider for SpotifyProvider {
             return Ok(None);
         }
         let url = format!("{}/tracks/{}", Self::api_base(), id);
-        let bearer = self.get_bearer().await?;
         let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, &bearer)
-            .send()
+            .execute_request("lookup_track_isrc", &RequestSpec::get(&url))
             .await?;
         if !resp.status().is_success() {
             return Ok(None);

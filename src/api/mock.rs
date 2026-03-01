@@ -5,11 +5,13 @@ use tracing::info;
 
 /// A simple mock provider used in tests and when no real credentials are present.
 /// It logs operations and returns deterministic fake IDs/URIs.
-pub struct MockProvider {}
+pub struct MockProvider {
+    client: reqwest::Client,
+}
 
 impl MockProvider {
     pub fn new() -> Self {
-        Self {}
+        Self { client: reqwest::Client::new() }
     }
     fn is_authenticated(&self) -> bool {
         false
@@ -21,6 +23,15 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
+    fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+    async fn get_bearer(&self) -> Result<String> {
+        Ok("Bearer mock".to_string())
+    }
+    async fn refresh_token(&self) -> Result<()> {
+        Ok(())
+    }
     fn name(&self) -> &str {
         MockProvider::name(self)
     }

@@ -401,7 +401,7 @@ impl TidalProvider {
         let bearer = self.get_bearer().await?;
         let cc = Self::country_code();
         let mut next_url = format!(
-            "{}/playlists/{}/items?countryCode={}",
+            "{}/playlists/{}/relationships/items?countryCode={}",
             base, playlist_id, cc
         );
 
@@ -413,8 +413,13 @@ impl TidalProvider {
                 .send()
                 .await?;
 
-            if !resp.status().is_success() {
-                let status = resp.status();
+            let status = resp.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                // TIDAL returns 404 for playlists with no items; treat
+                // that as an empty result.
+                return Ok(result);
+            }
+            if !status.is_success() {
                 let txt = resp.text().await.unwrap_or_default();
                 return Err(anyhow!(
                     "Failed to list TIDAL playlist items for {}: {} => {}",
@@ -429,6 +434,8 @@ impl TidalProvider {
             if let Some(items) = j.get("data").and_then(|d| d.as_array()) {
                 for item in items {
                     // Try to resolve the underlying track id for this playlist item.
+                    // Full resource format: relationships.track.data.id
+                    // Relationship format: item.id when type=="tracks"
                     let track_id_opt = item
                         .get("relationships")
                         .and_then(|r| r.get("track"))
@@ -441,6 +448,16 @@ impl TidalProvider {
                                 .and_then(|a| a.get("trackId").or_else(|| a.get("trackID")))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
+                        })
+                        .or_else(|| {
+                            // Relationship identifier object: { "type": "tracks", "id": "..." }
+                            if item.get("type").and_then(|v| v.as_str()) == Some("tracks") {
+                                item.get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
                         });
 
                     // TIDAL exposes the playlist item id under meta.itemId;
@@ -492,7 +509,7 @@ impl TidalProvider {
         let bearer = self.get_bearer().await?;
         let cc = Self::country_code();
         let mut next_url = format!(
-            "{}/playlists/{}/items?countryCode={}",
+            "{}/playlists/{}/relationships/items?countryCode={}",
             base, playlist_id, cc
         );
 
@@ -525,6 +542,8 @@ impl TidalProvider {
 
             if let Some(items) = j.get("data").and_then(|d| d.as_array()) {
                 for item in items {
+                    // Full resource format: relationships.track.data.id
+                    // Relationship format: item.id when type=="tracks"
                     let track_id_opt = item
                         .get("relationships")
                         .and_then(|r| r.get("track"))
@@ -537,6 +556,16 @@ impl TidalProvider {
                                 .and_then(|a| a.get("trackId").or_else(|| a.get("trackID")))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
+                        })
+                        .or_else(|| {
+                            // Relationship identifier object: { "type": "tracks", "id": "..." }
+                            if item.get("type").and_then(|v| v.as_str()) == Some("tracks") {
+                                item.get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
                         });
 
                     if let Some(id) = track_id_opt {

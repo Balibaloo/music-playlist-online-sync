@@ -113,9 +113,10 @@ pub async fn desired_remote_uris_for_playlist(
     if let Some((cached_mtime, cached_size, cached_hash, uris_json)) = {
         let pool = db_pool.clone();
         let playlist_name = playlist_name.to_string();
+        let provider_name_for_cache = provider.name().to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<(i64, i64, String, String)>, anyhow::Error> {
             let conn = pool.get()?;
-            Ok(db::get_playlist_cache(&conn, &playlist_name)?)
+            Ok(db::get_playlist_cache(&conn, &playlist_name, &provider_name_for_cache)?)
         })
         .await??
     } {
@@ -318,6 +319,7 @@ pub async fn desired_remote_uris_for_playlist(
     {
         let pool = db_pool.clone();
         let playlist_name = playlist_name.to_string();
+        let provider_name_for_cache = provider.name().to_string();
         let uris_json = serde_json::to_string(&uris)?;
         let file_hash_clone = file_hash.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
@@ -325,6 +327,7 @@ pub async fn desired_remote_uris_for_playlist(
             db::upsert_playlist_cache(
                 &conn,
                 &playlist_name,
+                &provider_name_for_cache,
                 file_mtime,
                 file_size,
                 &file_hash_clone,
@@ -1484,7 +1487,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     )?;
                                     // keep playlist cache in sync as well
                                     crate::db::migrate_playlist_cache(
-                                        &conn, &pl_from, &pl_to,
+                                        &conn, &prov, &pl_from, &pl_to,
                                     )?;
                                     // Cache the new display name under the new key
                                     crate::db::set_remote_display_name(

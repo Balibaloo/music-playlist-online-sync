@@ -33,12 +33,16 @@ CREATE TABLE IF NOT EXISTS track_cache (
 -- playlist cache: stores metadata for the last-read .m3u file so we can
 -- short-circuit expensive resolution when nothing has changed.  The
 -- `uris` column contains a JSON array of the computed remote URIs.
+-- Keyed by (playlist_name, provider_name) so each provider gets its own
+-- cached URI set.
 CREATE TABLE IF NOT EXISTS playlist_cache (
-  playlist_name TEXT PRIMARY KEY,
+  playlist_name TEXT NOT NULL,
+  provider_name TEXT NOT NULL DEFAULT '',
   file_mtime INTEGER NOT NULL,
   file_size INTEGER NOT NULL,
   file_hash TEXT NOT NULL,
-  uris TEXT NOT NULL
+  uris TEXT NOT NULL,
+  PRIMARY KEY (playlist_name, provider_name)
 );
 
 

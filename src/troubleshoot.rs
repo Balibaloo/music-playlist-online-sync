@@ -84,15 +84,23 @@ pub fn file_info(cfg: &Config, path: &Path) -> Result<()> {
             .and_then(|p| p.strip_prefix(&cfg.root_folder).ok())
         {
             let playlist_name = rel.display().to_string();
-            if let Ok(Some((mtime, size, hash, uris_json))) =
-                db::get_playlist_cache(&conn, &playlist_name)
-            {
-                println!("\nplaylist cache for '{}':", playlist_name);
-                println!("  file_mtime: {}", mtime);
-                println!("  file_size: {}", size);
-                println!("  file_hash: {}", hash);
-                println!("  cached uris: {}", (uris_json));
-            } else {
+            // Show playlist cache entries for all providers.
+            for provider in &["spotify", "tidal"] {
+                if let Ok(Some((mtime, size, hash, uris_json))) =
+                    db::get_playlist_cache(&conn, &playlist_name, provider)
+                {
+                    println!("\nplaylist cache for '{}' (provider={}):", playlist_name, provider);
+                    println!("  file_mtime: {}", mtime);
+                    println!("  file_size: {}", size);
+                    println!("  file_hash: {}", hash);
+                    println!("  cached uris: {}", (uris_json));
+                }
+            }
+            // If no entries found for any provider, say so.
+            let any_found = ["spotify", "tidal"]
+                .iter()
+                .any(|p| db::get_playlist_cache(&conn, &playlist_name, p).ok().flatten().is_some());
+            if !any_found {
                 println!("\nno playlist cache entry for '{}'", playlist_name);
             }
         }

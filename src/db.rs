@@ -98,6 +98,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         [],
     );
 
+    // Add remote_display_name column to playlist_map if it doesn't exist yet.
+    let _ = conn.execute(
+        "ALTER TABLE playlist_map ADD COLUMN remote_display_name TEXT;",
+        [],
+    );
+
+    // Historically playlist_map stored bare playlist_name keys for Spotify.
+    // We now uniformly prefix every key with "<provider>::".  Migrate any
+    // remaining bare keys by prefixing them with "spotify::".
+    let _ = conn.execute(
+        "UPDATE playlist_map SET playlist_name = 'spotify::' || playlist_name \
+         WHERE playlist_name NOT LIKE '%::%';",
+        [],
+    );
+
     Ok(())
 }
 
@@ -241,15 +256,8 @@ pub fn load_credential_with_client(
 }
 
 fn playlist_map_key(provider: &str, playlist_name: &str) -> String {
-    // Historically playlist_map was provider-agnostic and effectively
-    // stored Spotify IDs. To remain backward compatible, we treat bare
-    // playlist_name keys as belonging to Spotify and namespace other
-    // providers with a prefix.
-    if provider.eq_ignore_ascii_case("spotify") {
-        playlist_name.to_string()
-    } else {
-        format!("{}::{}", provider.to_lowercase(), playlist_name)
-    }
+    // All providers are uniformly namespaced as "<provider>::<playlist_name>".
+    format!("{}::{}", provider.to_lowercase(), playlist_name)
 }
 
 /// Get remote_id for playlist from playlist_map, scoped by provider
@@ -278,6 +286,37 @@ pub fn upsert_playlist_map(
     conn.execute(
         "INSERT INTO playlist_map (playlist_name, remote_id, last_synced_at) VALUES (?1, ?2, strftime('%s','now')) ON CONFLICT(playlist_name) DO UPDATE SET remote_id = excluded.remote_id, last_synced_at = strftime('%s','now')",
         params![key, remote_id],
+    )?;
+    Ok(())
+}
+
+/// Get the cached remote display name for a playlist_map entry.
+pub fn get_remote_display_name(
+    conn: &Connection,
+    provider: &str,
+    playlist_name: &str,
+) -> Result<Option<String>> {
+    let key = playlist_map_key(provider, playlist_name);
+    let mut stmt = conn.prepare(
+        "SELECT remote_display_name FROM playlist_map WHERE playlist_name = ?1 LIMIT 1",
+    )?;
+    let row = stmt
+        .query_row(params![key], |r| r.get::<_, Option<String>>(0))
+        .optional()?;
+    Ok(row.flatten())
+}
+
+/// Update the cached remote display name for a playlist_map entry.
+pub fn set_remote_display_name(
+    conn: &Connection,
+    provider: &str,
+    playlist_name: &str,
+    display_name: &str,
+) -> Result<()> {
+    let key = playlist_map_key(provider, playlist_name);
+    conn.execute(
+        "UPDATE playlist_map SET remote_display_name = ?1 WHERE playlist_name = ?2",
+        params![display_name, key],
     )?;
     Ok(())
 }

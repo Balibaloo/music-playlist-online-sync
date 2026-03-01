@@ -48,11 +48,15 @@ pub trait Provider: Send + Sync {
     /// accessible playlist on the provider. The default implementation
     /// assumes playlists remain valid forever and always returns true.
     ///
+    /// When the playlist is valid, returns `Ok(Some(current_name))` so
+    /// callers can cache the remote display name without an extra API call.
+    /// Returns `Ok(None)` when the playlist is no longer accessible.
+    ///
     /// Providers like Spotify that treat "delete" as an "unfollow" can
     /// override this to detect when the current user no longer has access
     /// to the playlist so callers can recreate it.
-    async fn playlist_is_valid(&self, _playlist_id: &str) -> Result<bool> {
-        Ok(true)
+    async fn playlist_is_valid(&self, _playlist_id: &str) -> Result<Option<String>> {
+        Ok(Some(String::new()))
     }
     /// Return the provider's name (for logging, UI, etc)
     fn name(&self) -> &str;

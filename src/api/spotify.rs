@@ -37,20 +37,23 @@ impl SpotifyProvider {
     /// playlist id. This is used to detect the case where a playlist
     /// was "deleted" (unfollowed) in the Spotify client while our
     /// local mapping still points at the old id.
-    async fn playlist_is_accessible(&self, playlist_id: &str) -> Result<bool> {
+    async fn playlist_is_accessible(&self, playlist_id: &str) -> Result<Option<String>> {
         // First, check whether the playlist id is still visible in the
         // current user's playlist library. This matches what the user sees
         // in the Spotify UI: if they've "deleted" (unfollowed) the playlist,
         // it will no longer appear in /users/{id}/playlists.
         let playlists = self.list_user_playlists().await?;
-        let in_library = playlists.iter().any(|(id, _name)| id == playlist_id);
-        if !in_library {
-            debug!(
-                "Spotify playlist {} no longer present in user library; treating mapping as invalid",
-                playlist_id
-            );
-            return Ok(false);
-        }
+        let found = playlists.iter().find(|(id, _name)| id == playlist_id);
+        let current_name = match found {
+            Some((_id, name)) => name.clone(),
+            None => {
+                debug!(
+                    "Spotify playlist {} no longer present in user library; treating mapping as invalid",
+                    playlist_id
+                );
+                return Ok(None);
+            }
+        };
 
         // As an extra safety check, confirm the playlist is still accessible
         // via the generic playlist endpoint.
@@ -64,7 +67,7 @@ impl SpotifyProvider {
             .await?;
         let status = resp.status();
         if status.is_success() {
-            return Ok(true);
+            return Ok(Some(current_name));
         }
         if status.as_u16() == 401 {
             // Try once more after refreshing token.
@@ -78,7 +81,7 @@ impl SpotifyProvider {
                 .await?;
             let st2 = resp2.status();
             if st2.is_success() {
-                return Ok(true);
+                return Ok(Some(current_name));
             }
             // 404/403 after refresh -> treat as invalid mapping.
             if st2 == reqwest::StatusCode::NOT_FOUND || st2 == reqwest::StatusCode::FORBIDDEN {
@@ -87,7 +90,7 @@ impl SpotifyProvider {
                     playlist_id,
                     st2
                 );
-                return Ok(false);
+                return Ok(None);
             }
             return Err(anyhow!(
                 "playlist_is_accessible failed after refresh: {}",
@@ -102,7 +105,7 @@ impl SpotifyProvider {
                 "Spotify playlist {} not accessible (status {}); treating as invalid",
                 playlist_id, status
             );
-            return Ok(false);
+            return Ok(None);
         }
 
         Err(anyhow!("playlist_is_accessible failed: {}", status))
@@ -621,7 +624,7 @@ impl Provider for SpotifyProvider {
         Ok(())
     }
 
-    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<bool> {
+    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<Option<String>> {
         self.playlist_is_accessible(playlist_id).await
     }
 

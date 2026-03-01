@@ -35,11 +35,24 @@ pub struct TidalProvider {
     root_folder_name: Option<String>,
     /// Cached id of the root userCollectionFolder (if created/found).
     root_folder_id: tokio::sync::Mutex<Option<String>>,
+    /// Cached result of `list_user_playlists()` so we only fetch the full
+    /// library once per worker run instead of once per playlist.
+    playlist_cache: tokio::sync::Mutex<Option<Vec<(String, String)>>>,
 }
 
 impl TidalProvider {
-    /// List all playlists for the authenticated user
+    /// List all playlists for the authenticated user.
+    /// Results are cached for the lifetime of the provider instance so that
+    /// multiple callers within a single worker run do not re-fetch the entire
+    /// TIDAL library each time.
     pub async fn list_user_playlists(&self) -> Result<Vec<(String, String)>> {
+        // Fast path: return cached result if available.
+        {
+            let cache = self.playlist_cache.lock().await;
+            if let Some(ref cached) = *cache {
+                return Ok(cached.clone());
+            }
+        }
         let bearer = self.get_bearer().await?;
         let base = Self::base_url();
 
@@ -159,7 +172,41 @@ impl TidalProvider {
         let mut playlists: Vec<(String, String)> = by_id.into_iter().collect();
         // Stable output order: sort by name for determinism.
         playlists.sort_by(|a, b| a.1.cmp(&b.1));
+
+        // Store in cache so subsequent calls within this worker run are free.
+        {
+            let mut cache = self.playlist_cache.lock().await;
+            *cache = Some(playlists.clone());
+        }
         Ok(playlists)
+    }
+
+    /// Update the cached name for an existing playlist after a rename,
+    /// avoiding a full re-fetch of the user's library.
+    async fn cache_update_name(&self, playlist_id: &str, new_name: &str) {
+        let mut cache = self.playlist_cache.lock().await;
+        if let Some(ref mut entries) = *cache {
+            if let Some(entry) = entries.iter_mut().find(|(id, _)| id == playlist_id) {
+                entry.1 = new_name.to_string();
+            }
+        }
+    }
+
+    /// Add a newly-created playlist to the cache so that subsequent calls
+    /// to `list_user_playlists` see it without a round-trip.
+    async fn cache_add_entry(&self, playlist_id: &str, name: &str) {
+        let mut cache = self.playlist_cache.lock().await;
+        if let Some(ref mut entries) = *cache {
+            entries.push((playlist_id.to_string(), name.to_string()));
+        }
+    }
+
+    /// Remove a deleted playlist from the cache.
+    async fn cache_remove_entry(&self, playlist_id: &str) {
+        let mut cache = self.playlist_cache.lock().await;
+        if let Some(ref mut entries) = *cache {
+            entries.retain(|(id, _)| id != playlist_id);
+        }
     }
 
     fn country_code() -> String {
@@ -201,6 +248,7 @@ impl TidalProvider {
             token: tokio::sync::Mutex::new(None),
             root_folder_name,
             root_folder_id: tokio::sync::Mutex::new(None),
+            playlist_cache: tokio::sync::Mutex::new(None),
         }
     }
     fn is_authenticated(&self) -> bool {
@@ -768,19 +816,20 @@ impl Provider for TidalProvider {
         let id = uri.rsplit(':').next().unwrap_or("").trim();
         id.parse::<u64>().ok().filter(|&n| n > 0).is_some()
     }
-    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<bool> {
+    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<Option<String>> {
         // Check whether the playlist UUID still appears in the user's
         // TIDAL library.  If it doesn't, the cached mapping is stale.
         match self.list_user_playlists().await {
             Ok(playlists) => {
-                let found = playlists.iter().any(|(id, _name)| id == playlist_id);
-                if !found {
+                if let Some((_id, name)) = playlists.iter().find(|(id, _name)| id == playlist_id) {
+                    Ok(Some(name.clone()))
+                } else {
                     log::debug!(
                         "TIDAL playlist {} not found in user library; treating mapping as invalid",
                         playlist_id
                     );
+                    Ok(None)
                 }
-                Ok(found)
             }
             Err(e) => {
                 // If we can't list playlists (e.g. network error), propagate
@@ -880,6 +929,9 @@ impl Provider for TidalProvider {
                 .ok_or_else(|| anyhow!("no playlist id in response"))?;
             let id_str = id.to_string();
 
+            // A new playlist was created – add it to the cache.
+            self.cache_add_entry(&id_str, name).await;
+
             // If a logical root folder is configured, best-effort add this
             // playlist under that folder so that all app-created playlists
             // appear grouped together in the user's TIDAL UI.
@@ -951,6 +1003,7 @@ impl Provider for TidalProvider {
                 let txt = resp.text().await.unwrap_or_default();
                 return Err(anyhow!("tidal rename failed: {} => {}", status, txt));
             }
+            self.cache_update_name(playlist_id, new_name).await;
             return Ok(());
         }
     }
@@ -1248,6 +1301,7 @@ impl Provider for TidalProvider {
                 txt
             ));
         }
+        self.cache_remove_entry(playlist_id).await;
         Ok(())
     }
 

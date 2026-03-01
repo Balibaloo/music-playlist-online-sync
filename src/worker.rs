@@ -621,6 +621,7 @@ async fn apply_in_batches(
                                     let pl = playlist_name.to_string();
                                     let prov = prov_name.clone();
                                     let new_id_clone = new_id.clone();
+                                    let dn = remote_display_name.to_string();
                                     tokio::task::spawn_blocking(
                                         move || -> Result<(), anyhow::Error> {
                                             let conn =
@@ -630,6 +631,12 @@ async fn apply_in_batches(
                                                 &prov,
                                                 &pl,
                                                 &new_id_clone,
+                                            )?;
+                                            crate::db::set_remote_display_name(
+                                                &conn,
+                                                &prov,
+                                                &pl,
+                                                &dn,
                                             )?;
                                             Ok(())
                                         },
@@ -845,6 +852,35 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     track_ops.push((EventAction::Remove, op.track_path.clone()))
                 }
                 _ => {}
+            }
+        }
+
+        // When a folder rename is present, rewrite stale track paths so that
+        // file-based resolution (ISRC extraction, etc.) can find the files at
+        // their new location on disk.
+        if let Some((ref from_name, ref to_name)) = rename_opt {
+            let old_prefix = cfg
+                .root_folder
+                .join(from_name)
+                .to_string_lossy()
+                .to_string();
+            let new_prefix = cfg
+                .root_folder
+                .join(to_name)
+                .to_string_lossy()
+                .to_string();
+            for (_action, track_path_opt) in track_ops.iter_mut() {
+                if let Some(tp) = track_path_opt {
+                    if tp.starts_with(&old_prefix) {
+                        let rewritten = format!("{}{}", new_prefix, &tp[old_prefix.len()..]);
+                        log::debug!(
+                            "rename_rewrite: {} -> {}",
+                            tp,
+                            rewritten
+                        );
+                        *tp = rewritten;
+                    }
+                }
             }
         }
 
@@ -1079,9 +1115,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         let pool = db_pool.clone();
                         let rid_clone = rid.clone();
                         let prov = provider_name.clone();
+                        let dn = remote_display_name.clone();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = pool.get()?;
                             db::upsert_playlist_map(&conn, &prov, &pl, &rid_clone)?;
+                            db::set_remote_display_name(&conn, &prov, &pl, &dn)?;
                             Ok(())
                         })
                         .await??;
@@ -1113,7 +1151,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 loop {
                     attempt += 1;
                     match provider.playlist_is_valid(&remote_id).await {
-                        Ok(false) => {
+                        Ok(None) => {
                             log::warn!(
                                 "{} {} {} remote_playlist_inaccessible id={}",
                                 log_run_tag(&worker_id),
@@ -1127,9 +1165,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     let pl = playlist_name.clone();
                                     let prov = provider_name.clone();
                                     let new_id_clone = new_id.clone();
+                                    let dn = remote_display_name.clone();
                                     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                                         let conn = pool.get()?;
                                         db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
+                                        db::set_remote_display_name(&conn, &prov, &pl, &dn)?;
                                         Ok(())
                                     })
                                     .await??;
@@ -1160,7 +1200,21 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             }
                             break;
                         }
-                        Ok(true) => {
+                        Ok(Some(current_remote_name)) => {
+                            // Opportunistically cache the remote display name
+                            // that the provider already fetched.
+                            if !current_remote_name.is_empty() {
+                                let pool = db_pool.clone();
+                                let pl = playlist_name.clone();
+                                let prov = provider_name.clone();
+                                let rn = current_remote_name.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if let Ok(conn) = pool.get() {
+                                        let _ = db::set_remote_display_name(&conn, &prov, &pl, &rn);
+                                    }
+                                })
+                                .await;
+                            }
                             // normal case, keep existing id
                             break;
                         }
@@ -1221,7 +1275,38 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             // We only attempt this if the desired remote display name differs
             // from the logical local playlist name to avoid unnecessary rename
             // calls when no online naming options are in use.
-            if rename_opt.is_none() && remote_display_name != *playlist_name {
+            //
+            // To avoid hitting the provider API every run when the name is
+            // already correct, we check the cached remote display name in
+            // the database and skip the PATCH if it already matches.
+            let needs_cfg_rename = if rename_opt.is_none() && remote_display_name != *playlist_name {
+                let cached_name = {
+                    let pool = db_pool.clone();
+                    let prov = provider_name.clone();
+                    let pl = playlist_name.clone();
+                    tokio::task::spawn_blocking(move || -> Result<Option<String>, anyhow::Error> {
+                        let conn = pool.get()?;
+                        Ok(db::get_remote_display_name(&conn, &prov, &pl)?)
+                    })
+                    .await??
+                };
+                if cached_name.as_deref() == Some(&remote_display_name) {
+                    log::info!(
+                        "{} {} {} display_name_already_correct id={} name={}",
+                        log_run_tag(&worker_id),
+                        pl_tag,
+                        log_phase_tag("RENAME"),
+                        remote_id,
+                        remote_display_name
+                    );
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+            if needs_cfg_rename {
                 let mut attempt = 0u32;
                 loop {
                     attempt += 1;
@@ -1238,6 +1323,19 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                 remote_id,
                                 remote_display_name
                             );
+                            // Cache the display name so subsequent runs skip the rename.
+                            {
+                                let pool = db_pool.clone();
+                                let prov = provider_name.clone();
+                                let pl = playlist_name.clone();
+                                let dn = remote_display_name.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    if let Ok(conn) = pool.get() {
+                                        let _ = db::set_remote_display_name(&conn, &prov, &pl, &dn);
+                                    }
+                                })
+                                .await;
+                            }
                             break;
                         }
                         Err(e) => {
@@ -1287,6 +1385,19 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                                         // Newly created playlist already has the desired
                                         // display name, so we can stop retrying.
+                                        // Cache it in DB too.
+                                        {
+                                            let pool = db_pool.clone();
+                                            let prov = provider_name.clone();
+                                            let pl = playlist_name.clone();
+                                            let dn = remote_display_name.clone();
+                                            let _ = tokio::task::spawn_blocking(move || {
+                                                if let Ok(conn) = pool.get() {
+                                                    let _ = db::set_remote_display_name(&conn, &prov, &pl, &dn);
+                                                }
+                                            })
+                                            .await;
+                                        }
                                         break;
                                     }
                                     Err(err) => {
@@ -1364,6 +1475,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             let prov = provider_name.clone();
                             let pl_from = playlist_name.clone();
                             let pl_to = to.clone();
+                            let new_name_clone = new_remote_name.clone();
                             let _ = tokio::task::spawn_blocking(
                                 move || -> Result<(), anyhow::Error> {
                                     let conn = pool.get()?;
@@ -1373,6 +1485,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     // keep playlist cache in sync as well
                                     crate::db::migrate_playlist_cache(
                                         &conn, &pl_from, &pl_to,
+                                    )?;
+                                    // Cache the new display name under the new key
+                                    crate::db::set_remote_display_name(
+                                        &conn, &prov, &pl_to, &new_name_clone,
                                     )?;
                                     Ok(())
                                 },

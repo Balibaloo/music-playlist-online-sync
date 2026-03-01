@@ -73,8 +73,8 @@ impl Provider for MockProvider {
         Ok(Vec::new())
     }
 
-    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<bool> {
+    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<Option<String>> {
         info!("MockProvider: playlist_is_valid {}", playlist_id);
-        Ok(true)
+        Ok(Some(String::new()))
     }
 }

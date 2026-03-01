@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS playlist_map (
   playlist_name TEXT UNIQUE NOT NULL,
   remote_id TEXT,
   remote_snapshot_id TEXT,
-  last_synced_at INTEGER
+  last_synced_at INTEGER,
+  remote_display_name TEXT
 );
 
 -- track cache

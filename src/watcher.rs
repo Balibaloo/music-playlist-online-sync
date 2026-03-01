@@ -4,7 +4,7 @@ use crate::models::EventAction;
 use crate::playlist;
 use crate::util;
 use anyhow::Context;
-use log::{info, warn};
+use log::{debug, info, warn};
 use notify::event::RemoveKind;
 use notify::{
     Config as NotifyConfig, Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode,
@@ -613,10 +613,6 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         move |res: NotifyResult<NotifyEvent>| {
             match res {
                 Ok(ev) => {
-                    info!(
-                        "NotifyEvent received: kind={:?}, paths={:?}, attrs={:?}",
-                        ev.kind, ev.paths, ev.attrs
-                    );
                     // convert notify::Event into synthetic events and apply
                     let mut synths: Vec<SyntheticEvent> = Vec::new();
                     // If multiple paths provided it's often a rename; try to distinguish
@@ -705,9 +701,16 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                     }
                     if !synths.is_empty() {
                         info!(
-                            "Applying {} synthetic event(s) derived from NotifyEvent",
-                            synths.len()
+                            "NotifyEvent received: kind={:?}, paths={:?}, attrs={:?} -> {} synthetic event(s)",
+                            ev.kind, ev.paths, ev.attrs, synths.len()
                         );
+                    } else {
+                        debug!(
+                            "NotifyEvent received (no matching files): kind={:?}, paths={:?}",
+                            ev.kind, ev.paths
+                        );
+                    }
+                    if !synths.is_empty() {
                         // apply to in-memory tree and enqueue DB events
                         if let Ok(mut t) = tree_cb.lock() {
                             for s in synths.into_iter() {

@@ -588,7 +588,7 @@ async fn apply_in_batches(
                                 attempt,
                                 e
                             );
-                            break;
+                            return Err(e);
                         }
                         continue;
                     } else {
@@ -679,7 +679,7 @@ async fn apply_in_batches(
                                 attempt,
                                 e
                             );
-                            break;
+                            return Err(e);
                         } else {
                             let exp = std::cmp::min(1u64 << attempt, 60);
                             let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };

@@ -40,7 +40,7 @@ fn spotify_token_refresh_success_and_preserve_client() {
     save_credentials(&conn, "spotify", &init_token, "test_id", "test_secret");
     std::env::set_var("SPOTIFY_AUTH_BASE", &base);
 
-    let provider = lib::api::spotify::SpotifyProvider::new(String::new(), String::new(), db_path.clone());
+    let provider = lib::api::spotify::SpotifyProvider::new(String::new(), String::new(), db_path.clone(), Default::default());
     // debug: ensure client credentials are loaded correctly
     let (cid, csecret) = provider.creds();
     eprintln!("spotify provider creds id='{}' secret='{}'", cid, csecret);
@@ -92,7 +92,7 @@ fn spotify_token_refresh_failure_invalid_client() {
     db::save_credential_raw(&conn, "spotify", &init_token, None, None).expect("save empty");
     std::env::set_var("SPOTIFY_AUTH_BASE", &base);
 
-    let provider = lib::api::spotify::SpotifyProvider::new(String::new(), String::new(), db_path.clone());
+    let provider = lib::api::spotify::SpotifyProvider::new(String::new(), String::new(), db_path.clone(), Default::default());
     let rt = tokio::runtime::Runtime::new().expect("rt");
     let res = rt.block_on(provider.get_bearer());
     assert!(res.is_err());
@@ -130,7 +130,7 @@ fn tidal_token_refresh_success_and_preserve_client() {
     save_credentials(&conn, "tidal", &init_token, "test_id", "test_secret");
     std::env::set_var("TIDAL_AUTH_BASE", &base);
 
-    let provider = lib::api::tidal::TidalProvider::new(String::new(), String::new(), db_path.clone(), None);
+    let provider = lib::api::tidal::TidalProvider::new(String::new(), String::new(), db_path.clone(), None, Default::default());
     let (tid, tsecret) = provider.creds();
     eprintln!("tidal provider creds id='{}' secret='{}'", tid, tsecret);
     let rt = tokio::runtime::Runtime::new().expect("rt");
@@ -181,7 +181,7 @@ fn tidal_token_refresh_failure_invalid_client() {
     db::save_credential_raw(&conn, "tidal", &init_token, None, None).expect("save empty");
     std::env::set_var("TIDAL_AUTH_BASE", &base);
 
-    let provider = lib::api::tidal::TidalProvider::new(String::new(), String::new(), db_path.clone(), None);
+    let provider = lib::api::tidal::TidalProvider::new(String::new(), String::new(), db_path.clone(), None, Default::default());
     let rt = tokio::runtime::Runtime::new().expect("rt");
     let res = rt.block_on(provider.get_bearer());
     if res.is_err() {

@@ -52,7 +52,7 @@ fn tidal_ensure_playlist_happy_path() {
     .to_string();
     db::save_credential_raw(&conn, "tidal", &stored, None, None).unwrap();
 
-    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None);
+    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None, Default::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move { provider.ensure_playlist("Test", "").await });
     if res.is_err() {
@@ -86,7 +86,7 @@ fn tidal_add_tracks_filters_invalid_ids() {
     .to_string();
     db::save_credential_raw(&conn, "tidal", &stored, None, None).unwrap();
 
-    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None);
+    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None, Default::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // case A: mixed valid/invalid URIs. expect exactly one POST with the valid id
@@ -156,7 +156,7 @@ fn tidal_search_helpers_ignore_zero_ids() {
     .to_string();
     db::save_credential_raw(&conn, "tidal", &stored, None, None).unwrap();
 
-    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None);
+    let provider = TidalProvider::new("cid".into(), "csecret".into(), db_path.clone(), None, Default::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Mock search /search/tracks returning id=0

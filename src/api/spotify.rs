@@ -28,6 +28,7 @@ pub struct SpotifyProvider {
     client_id: String,
     client_secret: String,
     db_path: std::path::PathBuf,
+    config: crate::config::Config,
     token: tokio::sync::Mutex<Option<StoredToken>>,
     user_id: tokio::sync::Mutex<Option<String>>,
 }
@@ -139,7 +140,7 @@ impl SpotifyProvider {
         }
         Ok(playlists)
     }
-    pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf) -> Self {
+    pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf, config: crate::config::Config) -> Self {
         // If either client_id or client_secret is empty, try to load from DB
         let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {
             if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -164,6 +165,7 @@ impl SpotifyProvider {
             client_id,
             client_secret,
             db_path,
+            config,
             token: tokio::sync::Mutex::new(None),
             user_id: tokio::sync::Mutex::new(None),
         }
@@ -326,6 +328,9 @@ impl SpotifyProvider {
 
 #[async_trait]
 impl Provider for SpotifyProvider {
+    fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
     fn http_client(&self) -> &reqwest::Client {
         &self.client
     }

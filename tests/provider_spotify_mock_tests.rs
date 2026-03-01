@@ -78,7 +78,7 @@ fn spotify_token_refresh_and_playlist_flow() {
         db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
         // Instantiate provider with dummy client id/secret and point to the temp db
-        let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());
+        let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone(), Default::default());
 
         // Call ensure_playlist which will call /me, refresh token, and create playlist
         let res = provider.ensure_playlist("Test Playlist", "desc").await;

@@ -84,6 +84,7 @@ fn tidal_provider_validate_uri() {
         String::new(),
         std::path::PathBuf::from("/dev/null"),
         None,
+        Default::default(),
     );
     // Valid tidal URIs: end with a positive numeric id
     assert!(tp.validate_uri("tidal:track:123456"));
@@ -104,6 +105,7 @@ fn tidal_provider_no_folder_nesting() {
         String::new(),
         std::path::PathBuf::from("/dev/null"),
         None,
+        Default::default(),
     );
     assert!(!tp.supports_folder_nesting());
 }

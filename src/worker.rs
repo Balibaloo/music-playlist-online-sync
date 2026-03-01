@@ -785,6 +785,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                 String::new(),
                 String::new(),
                 cfg.db_path.clone(),
+                cfg.clone(),
             )),
         ));
     }
@@ -810,6 +811,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                 } else {
                     Some(cfg.online_root_playlist.clone())
                 },
+                cfg.clone(),
             )),
         ));
     }

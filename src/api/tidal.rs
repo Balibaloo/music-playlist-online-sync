@@ -29,6 +29,7 @@ pub struct TidalProvider {
     client_id: String,
     client_secret: String,
     db_path: std::path::PathBuf,
+    config: crate::config::Config,
     token: tokio::sync::Mutex<Option<StoredToken>>,
     /// Optional logical root folder name under which this application
     /// should group all created playlists in the user's TIDAL collection.
@@ -210,6 +211,7 @@ impl TidalProvider {
         client_secret: String,
         db_path: std::path::PathBuf,
         root_folder_name: Option<String>,
+        config: crate::config::Config,
     ) -> Self {
         // If either client_id or client_secret is empty, try to load from DB
         let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {
@@ -235,6 +237,7 @@ impl TidalProvider {
             client_id,
             client_secret,
             db_path,
+            config,
             token: tokio::sync::Mutex::new(None),
             root_folder_name,
             root_folder_id: tokio::sync::Mutex::new(None),
@@ -771,6 +774,9 @@ impl TidalProvider {
 
 #[async_trait]
 impl Provider for TidalProvider {
+    fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
     fn http_client(&self) -> &reqwest::Client {
         &self.client
     }

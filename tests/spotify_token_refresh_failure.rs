@@ -47,7 +47,7 @@ fn spotify_refresh_failure_returns_error() {
     .to_string();
     db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
-    let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone());
+    let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone(), Default::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move { provider.ensure_playlist("X", "").await });
 

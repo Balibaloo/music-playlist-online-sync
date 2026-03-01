@@ -128,7 +128,7 @@ pub async fn file_lookup(cfg: &Config, provider_name: &str, path: &Path) -> Resu
         "spotify" => {
             use crate::api::spotify::SpotifyProvider;
             let db_path = cfg.db_path.clone();
-            std::sync::Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path))
+            std::sync::Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path, cfg.clone()))
         }
         "tidal" => {
             use crate::api::tidal::TidalProvider;
@@ -138,7 +138,7 @@ pub async fn file_lookup(cfg: &Config, provider_name: &str, path: &Path) -> Resu
             } else {
                 Some(cfg.online_root_playlist.clone())
             };
-            std::sync::Arc::new(TidalProvider::new(String::new(), String::new(), db_path, root))
+            std::sync::Arc::new(TidalProvider::new(String::new(), String::new(), db_path, root, cfg.clone()))
         }
         "mock" => {
             use crate::api::mock::MockProvider;

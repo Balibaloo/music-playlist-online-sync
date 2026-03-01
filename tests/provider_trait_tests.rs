@@ -15,6 +15,7 @@ fn test_spotify_provider_trait() {
         "client_id".to_string(),
         "client_secret".to_string(),
         std::path::PathBuf::from("/tmp/db"),
+        Default::default(),
     );
     assert_eq!(spotify.name(), "spotify");
     assert!(spotify.is_authenticated());
@@ -27,6 +28,7 @@ fn test_tidal_provider_trait() {
         "client_secret".to_string(),
         std::path::PathBuf::from("/tmp/db"),
         None,
+        Default::default(),
     );
     assert_eq!(tidal.name(), "tidal");
     assert!(tidal.is_authenticated());
@@ -38,6 +40,7 @@ fn test_spotify_provider_not_authenticated() {
         "".to_string(),
         "".to_string(),
         std::path::PathBuf::from("/tmp/db"),
+        Default::default(),
     );
     assert!(!spotify.is_authenticated());
 }
@@ -49,6 +52,7 @@ fn test_tidal_provider_not_authenticated() {
         "".to_string(),
         std::path::PathBuf::from("/tmp/db"),
         None,
+        Default::default(),
     );
     assert!(!tidal.is_authenticated());
 }
@@ -70,6 +74,7 @@ async fn test_provider_auth_playlist_ops() {
             spotify_id.clone(),
             spotify_secret.clone(),
             PathBuf::from(&db_path),
+            Default::default(),
         );
         let playlists = spotify
             .list_user_playlists()
@@ -110,6 +115,7 @@ async fn test_provider_auth_playlist_ops() {
             tidal_secret.clone(),
             PathBuf::from(&db_path),
             None,
+            Default::default(),
         );
         let playlists = tidal
             .list_user_playlists()

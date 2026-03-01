@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
                     let db_path = cfg.db_path.clone();
                     // Pass empty strings to load from DB
                     let spotify =
-                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
+                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path, cfg.clone()));
                     let list_playlists = {
                         let spotify = spotify.clone();
                         Box::pin(async move { spotify.list_user_playlists().await })
@@ -406,6 +406,7 @@ async fn main() -> Result<()> {
                         } else {
                             Some(cfg.online_root_playlist.clone())
                         },
+                        cfg.clone(),
                     ));
 
                     // First, explicitly test token refresh so users can see
@@ -561,7 +562,7 @@ async fn main() -> Result<()> {
 
                     let db_path = cfg.db_path.clone();
                     let prov =
-                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path));
+                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path, cfg.clone()));
                     if !prov.is_authenticated() {
                         eprintln!("Spotify provider is not authenticated. Run auth first.");
                         std::process::exit(1);
@@ -640,6 +641,7 @@ async fn main() -> Result<()> {
                         String::new(),
                         db_path,
                         root,
+                        cfg.clone(),
                     ));
                     if !prov.is_authenticated() {
                         eprintln!("Tidal provider is not authenticated. Run auth first.");

@@ -70,11 +70,26 @@ pub trait Provider: Send + Sync {
     // Provided: shared request execution with automatic retry / back-off
     // ------------------------------------------------------------------
 
+    /// Return the project configuration for this provider.
+    ///
+    /// The default implementation returns a configuration with all fields at
+    /// their [`serde(default)`] values (equivalent to an empty TOML file), so
+    /// mock / test providers that don't hold a real `Config` do not need to
+    /// override this.  Real providers should override it to return the
+    /// `Config` they were constructed with so that settings such as
+    /// [`Config::max_retries_on_error`] are respected by
+    /// [`Self::execute_request`].
+    fn config(&self) -> &Config {
+        use std::sync::OnceLock;
+        static DEFAULT: OnceLock<Config> = OnceLock::new();
+        DEFAULT.get_or_init(Config::default)
+    }
+
     /// Execute the HTTP request described by `spec`, retrying automatically on:
     ///
     /// - **401 Unauthorized** – calls [`Self::refresh_token`] once, then retries.
     /// - **429 Too Many Requests** – sleeps for `Retry-After + 1` seconds, up to
-    ///   three attempts.
+    ///   [`Config::max_retries_on_error`] attempts.
     ///
     /// Returns the raw `Response` for any status code after exhausting retries.
     /// Non-2xx statuses (other than 401/429 handled above) are returned as-is;
@@ -83,7 +98,7 @@ pub trait Provider: Send + Sync {
     /// **This method must not be overridden** by provider implementations.
     async fn execute_request(&self, op: &str, spec: &RequestSpec) -> Result<reqwest::Response> {
         use reqwest::header::AUTHORIZATION;
-        const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+        let max_retries = self.config().max_retries_on_error;
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
@@ -111,7 +126,7 @@ pub trait Provider: Send + Sync {
             let status = resp.status();
 
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                && attempt <= MAX_RATE_LIMIT_RETRIES
+                && attempt <= max_retries
             {
                 let retry_after = resp
                     .headers()

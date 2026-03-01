@@ -194,3 +194,12 @@ impl Config {
         Ok(cfg)
     }
 }
+
+impl Default for Config {
+    /// Return a `Config` with every field at its serde default value.
+    /// `root_folder` is set to `"."` (current directory).
+    /// Useful for tests and mock providers that don't have a real config file.
+    fn default() -> Self {
+        toml::from_str("root_folder = \".\"").expect("minimal Config must parse")
+    }
+}

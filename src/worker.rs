@@ -485,6 +485,7 @@ async fn apply_in_batches(
     if uris.is_empty() {
         return Ok(());
     }
+    let prov_name = provider.name().to_string();
     // choose an appropriate batch size for the provider
     // we call.  Spotify tolerates large payloads (configurable),
     // but Tidal is strictly limited to 1–20 items per request
@@ -508,7 +509,7 @@ async fn apply_in_batches(
                     log::info!(
                         "{} {} {} batch_applied size={} id={}",
                         log_run_tag(worker_id),
-                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                        log_playlist_tag(playlist_name, &prov_name),
                         log_phase_tag(phase),
                         chunk.len(),
                         playlist_id
@@ -553,7 +554,7 @@ async fn apply_in_batches(
                             log_run_tag(worker_id),
                             log_playlist_tag(
                                 playlist_name,
-                                &provider.name().to_string()
+                                &prov_name
                             ),
                             log_phase_tag(phase),
                             wait,
@@ -566,7 +567,7 @@ async fn apply_in_batches(
                             log_run_tag(worker_id),
                             log_playlist_tag(
                                 playlist_name,
-                                &provider.name().to_string()
+                                &prov_name
                             ),
                             log_phase_tag(phase),
                             wait + 1
@@ -581,7 +582,7 @@ async fn apply_in_batches(
                                 log_run_tag(worker_id),
                                 log_playlist_tag(
                                     playlist_name,
-                                    &provider.name().to_string()
+                                    &prov_name
                                 ),
                                 log_phase_tag(phase),
                                 attempt,
@@ -603,7 +604,7 @@ async fn apply_in_batches(
                                 log_run_tag(worker_id),
                                 log_playlist_tag(
                                     playlist_name,
-                                    &provider.name().to_string()
+                                    &prov_name
                                 ),
                                 log_phase_tag(phase),
                                 playlist_id
@@ -618,7 +619,7 @@ async fn apply_in_batches(
                                 Ok(new_id) => {
                                     let pool = db_pool.clone();
                                     let pl = playlist_name.to_string();
-                                    let prov = provider.name().to_string();
+                                    let prov = prov_name.clone();
                                     let new_id_clone = new_id.clone();
                                     tokio::task::spawn_blocking(
                                         move || -> Result<(), anyhow::Error> {
@@ -641,7 +642,7 @@ async fn apply_in_batches(
                                     log::info!(
                                         "{} {} {} playlist_recreated_for_batch new_id={}",
                                         log_run_tag(worker_id),
-                                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                        log_playlist_tag(playlist_name, &prov_name),
                                         log_phase_tag(phase),
                                         playlist_id
                                     );
@@ -657,7 +658,7 @@ async fn apply_in_batches(
                                     log::error!(
                                         "{} {} {} playlist_recreate_for_batch_failed error={}",
                                         log_run_tag(worker_id),
-                                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                        log_playlist_tag(playlist_name, &prov_name),
                                         log_phase_tag(phase),
                                         err
                                     );
@@ -672,7 +673,7 @@ async fn apply_in_batches(
                                 log_run_tag(worker_id),
                                 log_playlist_tag(
                                     playlist_name,
-                                    &provider.name().to_string()
+                                    &prov_name
                                 ),
                                 log_phase_tag(phase),
                                 attempt,
@@ -687,7 +688,7 @@ async fn apply_in_batches(
                                 log_run_tag(worker_id),
                                 log_playlist_tag(
                                     playlist_name,
-                                    &provider.name().to_string()
+                                    &prov_name
                                 ),
                                 log_phase_tag(phase),
                                 attempt,
@@ -699,7 +700,7 @@ async fn apply_in_batches(
                                 log_run_tag(worker_id),
                                 log_playlist_tag(
                                     playlist_name,
-                                    &provider.name().to_string()
+                                    &prov_name
                                 ),
                                 log_phase_tag(phase),
                                 exp
@@ -908,7 +909,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             let remote_id_opt = tokio::task::spawn_blocking({
                 let pool = db_pool.clone();
                 let pl = playlist_name.clone();
-                let prov = provider.name().to_string();
+                let prov = provider_name.clone();
                 move || -> Result<Option<String>, anyhow::Error> {
                     let conn = pool.get()?;
                     db::get_remote_playlist_id(&conn, &prov, &pl).map_err(|e| e.into())
@@ -984,7 +985,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 // Remove local playlist_map entry regardless of whether remote deletion succeeded
                 let pl = playlist_name.clone();
                 let pool = db_pool.clone();
-                let prov = provider.name().to_string();
+                let prov = provider_name.clone();
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                     let conn = pool.get()?;
                     let _ = db::delete_playlist_map(&conn, &prov, &pl)?;
@@ -1077,7 +1078,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         let pl = playlist_name.clone();
                         let pool = db_pool.clone();
                         let rid_clone = rid.clone();
-                        let prov = provider.name().to_string();
+                        let prov = provider_name.clone();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = pool.get()?;
                             db::upsert_playlist_map(&conn, &prov, &pl, &rid_clone)?;
@@ -1124,7 +1125,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                 Ok(new_id) => {
                                     let pool = db_pool.clone();
                                     let pl = playlist_name.clone();
-                                    let prov = provider.name().to_string();
+                                    let prov = provider_name.clone();
                                     let new_id_clone = new_id.clone();
                                     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                                         let conn = pool.get()?;
@@ -1259,7 +1260,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     Ok(new_id) => {
                                         let pool = db_pool.clone();
                                         let pl = playlist_name.clone();
-                                        let prov = provider.name().to_string();
+                                        let prov = provider_name.clone();
                                         let new_id_clone = new_id.clone();
                                         tokio::task::spawn_blocking(
                                             move || -> Result<(), anyhow::Error> {
@@ -1360,7 +1361,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             // new logical name from calling ensure_playlist and
                             // creating a duplicate remote playlist.
                             let pool = db_pool.clone();
-                            let prov = provider.name().to_string();
+                            let prov = provider_name.clone();
                             let pl_from = playlist_name.clone();
                             let pl_to = to.clone();
                             let _ = tokio::task::spawn_blocking(
@@ -1401,7 +1402,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     Ok(new_id) => {
                                         let pool = db_pool.clone();
                                         let pl = playlist_name.clone();
-                                        let prov = provider.name().to_string();
+                                        let prov = provider_name.clone();
                                         let new_id_clone = new_id.clone();
                                         tokio::task::spawn_blocking(
                                             move || -> Result<(), anyhow::Error> {

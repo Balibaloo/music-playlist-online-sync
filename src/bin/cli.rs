@@ -3,9 +3,9 @@ use clap::{Parser, Subcommand};
 use lib::api::Provider;
 use lib::config::Config;
 use music_file_playlist_online_sync as lib;
+use lib::troubleshoot;
 use std::path::{Path, PathBuf};
 use tracing::subscriber as tracing_subscriber_global;
-use tracing_appender::rolling::RollingFileAppender;
 use tracing_log::LogTracer;
 use tracing_subscriber;
 use tracing_subscriber::prelude::*;
@@ -60,6 +60,39 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Troubleshooting helpers
+    Troubleshoot {
+        #[command(subcommand)]
+        sub: TroubleshootCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TroubleshootCommands {
+    /// File‑related troubleshooting helpers
+    File {
+        #[command(subcommand)]
+        sub: TroubleshootFileCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TroubleshootFileCommands {
+    /// Show detailed information about a local media file (track) or playlist
+    Info {
+        /// Path to the file to inspect
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// Lookup the given file with a remote provider and refresh track cache
+    Lookup {
+        /// Provider name (spotify or tidal)
+        #[arg(value_name = "PROVIDER")]
+        provider: String,
+        /// Path to the local file to resolve
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -99,23 +132,61 @@ async fn main() -> Result<()> {
     let cfg = Config::from_path(&resolved_config_path)
         .with_context(|| format!("loading config from {}", resolved_config_path.display()))?;
 
-    // Initialize log->tracing bridge and structured logging.
-    // Logs go to both stdout and a daily-rotated file in cfg.log_dir.
+    // Initialize log->tracing bridge and structured logging.  We try to
+    // create the directory specified in the config so that the rolling file
+    // appender doesn't panic on startup; if the directory is unwritable we
+    // fall back to stdout-only logging and emit a warning on stderr.
     let _ = LogTracer::init();
-    let file_appender: RollingFileAppender =
-        tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // attempt to make the log directory if it doesn't exist; ignore errors
+    // when the directory is not writeable and silently fall back to a no-op
+    // layer that writes to `/dev/null`. this keeps the subscriber type
+    // consistent regardless of whether we could successfully create the
+    // rolling file appender.
+    // compute a file logging layer, falling back to a plain stdout-based
+    // NonBlocking writer when the rolling appender cannot be created.  we call
+    // `non_blocking(std::io::stdout())` each time so that the associated
+    // `WorkerGuard` is owned and dropped appropriately.
+    // if we have a writable log directory we will create the rolling appender
+    // normally; if we can't open the file ourselves we skip calling `daily` to
+    // avoid the internal panic that was observed earlier.
+    let file_layer = if let Ok(()) = std::fs::create_dir_all(&cfg.log_dir) {
+        let probe = cfg.log_dir.join("music-sync.log");
+        match std::fs::OpenOptions::new().create(true).append(true).open(&probe) {
+            Ok(_) => {
+                // since we were able to touch the file, it's reasonably safe to
+                // ask the appender to manage it as well.
+                let app = tracing_appender::rolling::daily(&cfg.log_dir, "music-sync.log");
+                let (non_blocking, _guard) = tracing_appender::non_blocking(app);
+                fmt::layer().with_writer(non_blocking)
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: cannot open log file {}: {}; logging to stdout only",
+                    probe.display(), e
+                );
+                let (nb, _guard) = tracing_appender::non_blocking(std::io::stdout());
+                fmt::layer().with_writer(nb)
+            }
+        }
+    } else {
+        eprintln!(
+            "warning: could not create log directory {}: {}; logging to stdout only",
+            cfg.log_dir.display(), std::io::Error::new(std::io::ErrorKind::PermissionDenied, "create_dir_all failed")
+        );
+        let (nb, _guard) = tracing_appender::non_blocking(std::io::stdout());
+        fmt::layer().with_writer(nb)
+    };
 
     // Honor RUST_LOG if set, otherwise default to info.
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let file_layer = fmt::layer().with_writer(non_blocking);
     let stdout_layer = fmt::layer().with_writer(std::io::stdout);
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
-        .with(file_layer)
-        .with(stdout_layer);
+        .with(stdout_layer)
+        .with(file_layer);
 
     // Install as global default tracing subscriber without triggering
     // tracing-subscriber’s internal log bridge (we already call LogTracer).
@@ -369,6 +440,16 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Troubleshoot { sub } => match sub {
+            TroubleshootCommands::File { sub } => match sub {
+                TroubleshootFileCommands::Info { path } => {
+                    troubleshoot::file_info(&cfg, &path)?;
+                }
+                TroubleshootFileCommands::Lookup { provider, path } => {
+                    troubleshoot::file_lookup(&cfg, &provider, &path).await?;
+                }
+            },
+        },
         Commands::QueueStatus => {
             let db_path = cfg.db_path.clone();
             match rusqlite::Connection::open(&db_path) {

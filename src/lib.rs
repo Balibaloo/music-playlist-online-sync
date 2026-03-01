@@ -7,4 +7,7 @@ pub mod models;
 pub mod playlist;
 pub mod util;
 pub mod watcher;
+
+// utilities for debugging/troubleshooting in the CLI
+pub mod troubleshoot;
 pub mod worker;

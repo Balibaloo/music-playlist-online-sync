@@ -416,13 +416,12 @@ impl TidalProvider {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let txt = resp.text().await.unwrap_or_default();
-                log::warn!(
+                return Err(anyhow!(
                     "Failed to list TIDAL playlist items for {}: {} => {}",
                     playlist_id,
                     status,
                     txt
-                );
-                break;
+                ));
             }
 
             let j: serde_json::Value = resp.json().await?;

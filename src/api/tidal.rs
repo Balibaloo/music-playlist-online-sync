@@ -727,6 +727,19 @@ impl Provider for TidalProvider {
     fn is_authenticated(&self) -> bool {
         TidalProvider::is_authenticated(self)
     }
+    fn supports_folder_nesting(&self) -> bool {
+        false
+    }
+    fn max_batch_size(&self, cfg: &crate::config::Config) -> usize {
+        cfg.max_batch_size_tidal
+    }
+    fn validate_uri(&self, uri: &str) -> bool {
+        // Only accept URIs whose trailing numeric id is a strictly positive
+        // integer.  This mirrors the filtering that was previously hard-coded
+        // in the worker and prevents 400 errors from the TIDAL API.
+        let id = uri.rsplit(':').next().unwrap_or("").trim();
+        id.parse::<u64>().ok().filter(|&n| n > 0).is_some()
+    }
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
         let base = Self::base_url();
         // JSON:API-style endpoint: POST /playlists

@@ -6,6 +6,7 @@ pub mod tidal;
 pub mod tidal_auth;
 
 use anyhow::Result;
+use crate::config::Config;
 
 /// Provider trait: a minimal set of operations the worker needs.
 /// Implementations: spotify::SpotifyProvider, mock::MockProvider, and later tidal::TidalProvider.
@@ -58,4 +59,23 @@ pub trait Provider: Send + Sync {
 
     /// Return true if the provider is authenticated and ready to process events
     fn is_authenticated(&self) -> bool;
+
+    /// Whether this provider supports hierarchical playlist folders.
+    /// Providers like Tidal that have a flat namespace should return false.
+    fn supports_folder_nesting(&self) -> bool {
+        true
+    }
+
+    /// Maximum number of track URIs to send in a single batch request.
+    /// Override to apply provider-specific caps (e.g. Tidal limits to 20).
+    fn max_batch_size(&self, cfg: &Config) -> usize {
+        cfg.max_batch_size_spotify
+    }
+
+    /// Validate a resolved remote URI before it is sent to the provider.
+    /// Return `true` if the URI is acceptable, `false` to drop it.
+    /// The default implementation accepts everything.
+    fn validate_uri(&self, _uri: &str) -> bool {
+        true
+    }
 }

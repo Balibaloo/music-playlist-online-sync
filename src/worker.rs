@@ -272,20 +272,18 @@ pub async fn desired_remote_uris_for_playlist(
     let mut seen = std::collections::HashSet::new();
     uris.retain(|u| seen.insert(u.clone()));
 
-    // If we're targeting Tidal, drop any URIs whose numeric id isn't a
-    // strictly positive integer.  This mirrors the filtering in
-    // TidalProvider::add_tracks and ensures we don't propagate bad values
-    // farther upstream (which could otherwise trigger the 400 errors seen in
-    // the logs).
-    if provider.name() == "tidal" {
+    // Drop any URIs that the provider considers invalid.  This uses the
+    // Provider::validate_uri trait method so each backend can enforce its
+    // own invariants (e.g. Tidal requires a positive numeric id suffix).
+    {
         let mut dropped = 0;
         uris.retain(|u| {
-            let id = u.rsplit(':').next().unwrap_or("").trim();
-            if id.parse::<u64>().ok().filter(|&n| n > 0).is_some() {
+            if provider.validate_uri(u) {
                 true
             } else {
                 log::warn!(
-                    "reconcile: dropping invalid tidal uri {:?} generated from local playlist",
+                    "reconcile: dropping invalid {} uri {:?} generated from local playlist",
+                    provider.name(),
                     u
                 );
                 dropped += 1;
@@ -294,8 +292,9 @@ pub async fn desired_remote_uris_for_playlist(
         });
         if dropped > 0 {
             log::warn!(
-                "reconcile: removed {} invalid tidal uri(s) before caching",
-                dropped
+                "reconcile: removed {} invalid {} uri(s) before caching",
+                dropped,
+                provider.name()
             );
         }
     }
@@ -324,15 +323,7 @@ pub async fn desired_remote_uris_for_playlist(
     Ok(uris)
 }
 
-/// Return true if the given provider supports hierarchical playlist folders.
-/// Some providers (e.g. Tidal) do not expose folder nesting via their APIs
-/// and must be treated as flat for naming purposes.
-fn provider_supports_folder_nesting(provider_name: &str) -> bool {
-    match provider_name {
-        "tidal" => false,
-        _ => true,
-    }
-}
+
 
 /// Decide whether we should pre‑compute the set of desired remote URIs for a
 /// playlist before performing any reconciliation work.
@@ -376,11 +367,10 @@ pub fn should_precompute_desired(has_delete: bool, has_track_ops: bool, has_rena
 /// - "${relative_path}"  -> legacy alias, expanded as
 ///                            `path_to_parent + folder_name` so that existing
 ///                            configs continue to work.
-fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key: &str) -> String {
+fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key: &str, supports_folders: bool) -> String {
     let root = cfg.online_root_playlist.trim();
     let structure = cfg.online_playlist_structure.as_str();
     let delim_cfg = cfg.online_folder_flattening_delimiter.as_str();
-    let supports_folders = provider_supports_folder_nesting(provider_name);
 
     // Normalize the logical playlist key to use "/" as a separator so we
     // can split it into parent path and folder_name. Existing databases may
@@ -851,7 +841,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Compute the desired remote display name for this playlist on this provider.
             let remote_display_name =
-                compute_remote_playlist_name(cfg, provider.name(), playlist_name);
+                compute_remote_playlist_name(cfg, provider.name(), playlist_name, provider.supports_folder_nesting());
 
             let mut remote_id = if let Some(rid) = remote_id_opt {
                 rid
@@ -1138,7 +1128,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Apply rename first
             if let Some((_from, to)) = rename_opt.clone() {
-                let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to);
+                let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to, provider.supports_folder_nesting());
                 let mut attempt = 0u32;
                 loop {
                     attempt += 1;
@@ -1662,10 +1652,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 // cap here prevents 400 errors such as
                 // "size must be between 1 and 20" which were flooding the
                 // logs.
-                let batch_size = match provider.name() {
-                    "tidal" => cfg.max_batch_size_tidal,
-                    _ => cfg.max_batch_size_spotify,
-                };
+                let batch_size = provider.max_batch_size(cfg);
                 for chunk in uris.chunks(batch_size) {
                     let mut attempt = 0u32;
                     loop {

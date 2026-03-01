@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod models;
 pub mod playlist;
+pub mod retry;
 pub mod util;
 pub mod watcher;
 

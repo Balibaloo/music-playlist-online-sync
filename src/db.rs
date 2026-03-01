@@ -4,6 +4,27 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
+/// A thread-safe connection pool backed by r2d2 + rusqlite.
+pub type DbPool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
+
+/// Create a connection pool for the given database path.
+/// The pool is pre-initialized with a small number of connections so that
+/// `spawn_blocking` tasks can check out a connection without opening a new one
+/// every time.
+pub fn create_pool(path: &Path) -> Result<DbPool> {
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(path);
+    let pool = r2d2::Pool::builder()
+        .max_size(4)
+        .build(manager)
+        .with_context(|| format!("building DB pool for {}", path.display()))?;
+    // Run migrations on a fresh connection from the pool.
+    {
+        let conn = pool.get().with_context(|| "getting pool connection for migrations")?;
+        run_migrations(&conn)?;
+    }
+    Ok(pool)
+}
+
 pub fn open_or_create(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     run_migrations(&conn)?;

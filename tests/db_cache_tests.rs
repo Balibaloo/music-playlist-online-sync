@@ -117,6 +117,7 @@ async fn playlist_cache_and_rename_migration() {
         let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
         music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
     }
+    let pool = music_file_playlist_online_sync::db::create_pool(&cfg.db_path).unwrap();
 
     // counting provider to ensure resolution only happens once per file
     struct CountingProvider(Arc<std::sync::Mutex<usize>>);
@@ -171,7 +172,7 @@ async fn playlist_cache_and_rename_migration() {
     let provider = Arc::new(CountingProvider::new(counter.clone()));
 
     // first run should populate cache and increment counter
-    let uris1 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone())
+    let uris1 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool)
         .await
         .unwrap();
     assert_eq!(uris1, vec!["uri".to_string()]);
@@ -179,7 +180,7 @@ async fn playlist_cache_and_rename_migration() {
     assert!(calls_after_first > 0);
 
     // second run without changing the file should hit cache and not increment
-    let uris2 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone())
+    let uris2 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool)
         .await
         .unwrap();
     assert_eq!(uris2, uris1);
@@ -195,7 +196,7 @@ async fn playlist_cache_and_rename_migration() {
     music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "foo", "bar").unwrap();
 
     // third run using new logical name should also hit cache (no new provider calls)
-    let uris3 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone())
+    let uris3 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone(), &pool)
         .await
         .unwrap();
     assert_eq!(uris3, uris1);
@@ -250,6 +251,7 @@ async fn skip_resolve_when_track_ops() {
         let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
         music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
     }
+    let pool = music_file_playlist_online_sync::db::create_pool(&cfg.db_path).unwrap();
 
     struct CountingProvider(Arc<std::sync::Mutex<usize>>);
     impl CountingProvider {
@@ -292,7 +294,7 @@ async fn skip_resolve_when_track_ops() {
     let mut reconcile_desired: Option<Vec<String>> = None;
     if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
         // would call `desired_remote_uris_for_playlist` here
-        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone()).await;
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool).await;
         reconcile_desired = Some(Vec::new());
     }
 
@@ -474,6 +476,7 @@ async fn skip_resolve_on_rename_only() {
         let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
         music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
     }
+    let pool = music_file_playlist_online_sync::db::create_pool(&cfg.db_path).unwrap();
 
     struct CountingProvider(Arc<std::sync::Mutex<usize>>);
     impl CountingProvider {
@@ -513,7 +516,7 @@ async fn skip_resolve_on_rename_only() {
 
     let mut reconcile_desired: Option<Vec<String>> = None;
     if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
-        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone()).await;
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool).await;
         reconcile_desired = Some(Vec::new());
     }
 

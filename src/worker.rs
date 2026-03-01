@@ -28,12 +28,12 @@ fn log_phase_tag(phase: &str) -> String {
     format!("[PH:{:<width$}]", phase, width = PHASE_WIDTH)
 }
 
-async fn mark_events_synced_async(db_path: std::path::PathBuf, ids: Vec<i64>) -> Result<()> {
+async fn mark_events_synced_async(pool: db::DbPool, ids: Vec<i64>) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-        let mut conn = rusqlite::Connection::open(&db_path)?;
+        let mut conn = pool.get()?;
         db::mark_events_synced(&mut conn, &ids)?;
         Ok(())
     })
@@ -52,6 +52,7 @@ pub async fn desired_remote_uris_for_playlist(
     cfg: &Config,
     playlist_name: &str,
     provider: Arc<dyn Provider>,
+    db_pool: &db::DbPool,
 ) -> Result<Vec<String>> {
     use std::io::BufRead;
 
@@ -96,10 +97,10 @@ pub async fn desired_remote_uris_for_playlist(
 
     // check playlist cache; if the file is unchanged we can return early
     if let Some((cached_mtime, cached_size, cached_hash, uris_json)) = {
-        let db_path = cfg.db_path.clone();
+        let pool = db_pool.clone();
         let playlist_name = playlist_name.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<(i64, i64, String, String)>, anyhow::Error> {
-            let conn = rusqlite::Connection::open(db_path)?;
+            let conn = pool.get()?;
             Ok(db::get_playlist_cache(&conn, &playlist_name)?)
         })
         .await??
@@ -130,13 +131,13 @@ pub async fn desired_remote_uris_for_playlist(
 
         // First, try the track cache by local path.
         // lookup existing cache entry (includes resolved_at timestamp)
-        let db_path = cfg.db_path.clone();
+        let pool = db_pool.clone();
         let provider_name_for_lookup = provider_name.clone();
         let local_path_for_lookup = local_path_str.clone();
         let cached: Option<(Option<String>, Option<String>, i64)> =
             tokio::task::spawn_blocking(
                 move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
-                    let conn = rusqlite::Connection::open(db_path)?;
+                    let conn = pool.get()?;
                     Ok(db::get_track_cache_by_local(
                         &conn,
                         &provider_name_for_lookup,
@@ -175,11 +176,11 @@ pub async fn desired_remote_uris_for_playlist(
                 uri_opt = Some(u.clone());
 
                 // Persist into track_cache for future lookups.
-                let db_path = cfg.db_path.clone();
+                let pool = db_pool.clone();
                 let local_path_for_cache = local_path_str.clone();
                 let provider_name_for_cache = provider.name().to_string();
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let conn = rusqlite::Connection::open(db_path)?;
+                    let conn = pool.get()?;
                     let _ = db::upsert_track_cache(
                         &conn,
                         &provider_name_for_cache,
@@ -218,12 +219,12 @@ pub async fn desired_remote_uris_for_playlist(
                     uri_opt = Some(u.clone());
 
                     // Persist into track_cache.
-                    let db_path = cfg.db_path.clone();
+                    let pool = db_pool.clone();
                     let local_path_for_cache = local_path_str.clone();
                     let provider_name_for_cache = provider.name().to_string();
                     let isrc_clone = extracted.clone();
                     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                        let conn = rusqlite::Connection::open(db_path)?;
+                        let conn = pool.get()?;
                         let _ = db::upsert_track_cache(
                             &conn,
                             &provider_name_for_cache,
@@ -249,12 +250,12 @@ pub async fn desired_remote_uris_for_playlist(
                 provider.name()
             );
             // record negative result to avoid repeated lookups for a while
-            let db_path = cfg.db_path.clone();
+            let pool = db_pool.clone();
             let local_path_for_cache = local_path_str.clone();
             let provider_name_for_cache = provider.name().to_string();
             let maybe_isrc = extracted.clone();
             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let conn = rusqlite::Connection::open(db_path)?;
+                let conn = pool.get()?;
                 let _ = db::upsert_track_cache(
                     &conn,
                     &provider_name_for_cache,
@@ -301,12 +302,12 @@ pub async fn desired_remote_uris_for_playlist(
 
     // store the result in the cache for next time
     {
-        let db_path = cfg.db_path.clone();
+        let pool = db_pool.clone();
         let playlist_name = playlist_name.to_string();
         let uris_json = serde_json::to_string(&uris)?;
         let file_hash_clone = file_hash.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-            let conn = rusqlite::Connection::open(db_path)?;
+            let conn = pool.get()?;
             db::upsert_playlist_cache(
                 &conn,
                 &playlist_name,
@@ -367,7 +368,7 @@ pub fn should_precompute_desired(has_delete: bool, has_track_ops: bool, has_rena
 /// - "${relative_path}"  -> legacy alias, expanded as
 ///                            `path_to_parent + folder_name` so that existing
 ///                            configs continue to work.
-fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key: &str, supports_folders: bool) -> String {
+fn compute_remote_playlist_name(cfg: &Config, _provider_name: &str, playlist_key: &str, supports_folders: bool) -> String {
     let root = cfg.online_root_playlist.trim();
     let structure = cfg.online_playlist_structure.as_str();
     let delim_cfg = cfg.online_folder_flattening_delimiter.as_str();
@@ -455,32 +456,14 @@ fn compute_remote_playlist_name(cfg: &Config, provider_name: &str, playlist_key:
 pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     let worker_id = Uuid::new_v4().to_string();
 
-    // Ensure DB migrations are run (blocking)
-    let _conn = tokio::task::spawn_blocking({
-        let db_path = cfg.db_path.clone();
-        move || -> Result<(), anyhow::Error> {
-            let path_display = db_path.display().to_string();
-            let c = rusqlite::Connection::open(&db_path)
-                .with_context(|| format!("opening DB for migrations at {}", path_display))?;
-            db::run_migrations(&c).with_context(|| {
-                format!("running DB migrations using schema for {}", path_display)
-            })?;
-            Ok(())
-        }
-    })
-    .await??;
+    // Create a connection pool and run migrations once.
+    let db_pool = db::create_pool(&cfg.db_path)?;
 
-    // Fetch unsynced events (blocking) by opening a fresh connection in the blocking task
+    // Fetch unsynced events (blocking)
     let events: Vec<Event> = tokio::task::spawn_blocking({
-        let db_path = cfg.db_path.clone();
+        let pool = db_pool.clone();
         move || -> Result<Vec<Event>, anyhow::Error> {
-            let path_display = db_path.display().to_string();
-            let conn = rusqlite::Connection::open(&db_path).with_context(|| {
-                format!(
-                    "opening DB for fetching unsynced events at {}",
-                    path_display
-                )
-            })?;
+            let conn = pool.get().context("pool: fetch unsynced events")?;
             db::fetch_unsynced_events(&conn).map_err(|e| e.into())
         }
     })
@@ -507,16 +490,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     // Collect all authenticated providers
     let mut providers: Vec<(String, Arc<dyn Provider>)> = Vec::new();
     // Spotify
-    let db_path = cfg.db_path.clone();
-    let has_spotify = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
-        let path_display = db_path.display().to_string();
-        let conn = rusqlite::Connection::open(&db_path).with_context(|| {
-            format!(
-                "opening DB for loading spotify credentials at {}",
-                path_display
-            )
-        })?;
-        Ok(db::load_credential_with_client(&conn, "spotify")?.is_some())
+    let has_spotify = tokio::task::spawn_blocking({
+        let pool = db_pool.clone();
+        move || -> Result<bool, anyhow::Error> {
+            let conn = pool.get().context("pool: load spotify credentials")?;
+            Ok(db::load_credential_with_client(&conn, "spotify")?.is_some())
+        }
     })
     .await??;
     if has_spotify {
@@ -531,16 +510,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         ));
     }
     // Tidal
-    let db_path = cfg.db_path.clone();
-    let has_tidal = tokio::task::spawn_blocking(move || -> Result<bool, anyhow::Error> {
-        let path_display = db_path.display().to_string();
-        let conn = rusqlite::Connection::open(&db_path).with_context(|| {
-            format!(
-                "opening DB for loading tidal credentials at {}",
-                path_display
-            )
-        })?;
-        Ok(db::load_credential_with_client(&conn, "tidal")?.is_some())
+    let has_tidal = tokio::task::spawn_blocking({
+        let pool = db_pool.clone();
+        move || -> Result<bool, anyhow::Error> {
+            let conn = pool.get().context("pool: load tidal credentials")?;
+            Ok(db::load_credential_with_client(&conn, "tidal")?.is_some())
+        }
     })
     .await??;
     if has_tidal {
@@ -584,7 +559,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
         let playlist_folder = cfg.root_folder.join(playlist_name);
         if !matches_whitelist(&playlist_folder, &remote_whitelist) {
             let ids_to_mark: Vec<i64> = evs.iter().map(|ev| ev.id).collect();
-            mark_events_synced_async(cfg.db_path.clone(), ids_to_mark).await?;
+            mark_events_synced_async(db_pool.clone(), ids_to_mark).await?;
             continue;
         }
         // Process providers sequentially (safety). Could be parallelized with locks.
@@ -600,11 +575,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Try acquire lock (TTL = 10 minutes default)
             let lock_acquired = tokio::task::spawn_blocking({
-                let db_path = cfg.db_path.clone();
+                let pool = db_pool.clone();
                 let pl = playlist_name.clone();
                 let wid = worker_id.clone();
                 move || -> Result<bool, anyhow::Error> {
-                    let mut conn = rusqlite::Connection::open(db_path)?;
+                    let mut conn = pool.get()?;
                     Ok(db::try_acquire_playlist_lock(&mut conn, &pl, &wid, 600)?)
                 }
             })
@@ -622,7 +597,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Ensure we release lock at end
             let release_on_exit = (
-                cfg.db_path.clone(),
+                db_pool.clone(),
                 playlist_name.clone(),
                 worker_id.clone(),
             );
@@ -676,11 +651,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Resolve remote playlist id from playlist_map (or create via provider.ensure_playlist if needed).
             let remote_id_opt = tokio::task::spawn_blocking({
-                let db_path = cfg.db_path.clone();
+                let pool = db_pool.clone();
                 let pl = playlist_name.clone();
                 let prov = provider.name().to_string();
                 move || -> Result<Option<String>, anyhow::Error> {
-                    let conn = rusqlite::Connection::open(db_path)?;
+                    let conn = pool.get()?;
                     db::get_remote_playlist_id(&conn, &prov, &pl).map_err(|e| e.into())
                 }
             })
@@ -753,10 +728,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                 // Remove local playlist_map entry regardless of whether remote deletion succeeded
                 let pl = playlist_name.clone();
-                let db_path = cfg.db_path.clone();
+                let pool = db_pool.clone();
                 let prov = provider.name().to_string();
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let conn = rusqlite::Connection::open(db_path)?;
+                    let conn = pool.get()?;
                     let _ = db::delete_playlist_map(&conn, &prov, &pl)?;
                     Ok(())
                 })
@@ -764,9 +739,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                 // Mark original events as synced (so they don't get retried forever)
                 let ids_clone = original_ids.clone();
-                let db_path = cfg.db_path.clone();
+                let pool = db_pool.clone();
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let mut conn = rusqlite::Connection::open(db_path)?;
+                    let mut conn = pool.get()?;
                     if !ids_clone.is_empty() {
                         db::mark_events_synced(&mut conn, &ids_clone)?;
                     }
@@ -775,9 +750,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 .await??;
 
                 // release lock
-                let (dbp, pln, wid) = release_on_exit.clone();
+                let (release_pool, pln, wid) = release_on_exit.clone();
                 let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let mut conn = rusqlite::Connection::open(dbp)?;
+                    let mut conn = release_pool.get()?;
                     db::release_playlist_lock(&mut conn, &pln, &wid)?;
                     Ok(())
                 })
@@ -814,7 +789,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     pl_tag,
                     log_phase_tag("RESOLVE")
                 );
-                match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone()).await {
+                match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone(), &db_pool).await {
                     Ok(desired) => {
                         log::info!(
                             "{} {} {} reconcile_desired_uris_computed count={}",
@@ -851,11 +826,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     Ok(rid) => {
                         // persist
                         let pl = playlist_name.clone();
-                        let db_path = cfg.db_path.clone();
+                        let pool = db_pool.clone();
                         let rid_clone = rid.clone();
                         let prov = provider.name().to_string();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let conn = rusqlite::Connection::open(db_path)?;
+                            let conn = pool.get()?;
                             db::upsert_playlist_map(&conn, &prov, &pl, &rid_clone)?;
                             Ok(())
                         })
@@ -871,10 +846,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             e
                         );
                         // release lock and continue
-                        let (dbp, pln, wid) = release_on_exit.clone();
+                        let (release_pool, pln, wid) = release_on_exit.clone();
                         let _ =
                             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                let mut conn = rusqlite::Connection::open(dbp)?;
+                                let mut conn = release_pool.get()?;
                                 let _ = db::release_playlist_lock(&mut conn, &pln, &wid)?;
                                 Ok(())
                             })
@@ -904,12 +879,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             );
                             match provider.ensure_playlist(&remote_display_name, "").await {
                                 Ok(new_id) => {
-                                    let db_path = cfg.db_path.clone();
+                                    let pool = db_pool.clone();
                                     let pl = playlist_name.clone();
                                     let prov = provider.name().to_string();
                                     let new_id_clone = new_id.clone();
                                     tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                        let conn = rusqlite::Connection::open(db_path)?;
+                                        let conn = pool.get()?;
                                         db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
                                         Ok(())
                                     })
@@ -934,10 +909,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     );
 
                                     // Release lock and skip further processing for this playlist.
-                                    let (dbp, pln, wid) = release_on_exit.clone();
+                                    let (release_pool, pln, wid) = release_on_exit.clone();
                                     let _ = tokio::task::spawn_blocking(
                                         move || -> Result<(), anyhow::Error> {
-                                            let mut conn = rusqlite::Connection::open(dbp)?;
+                                            let mut conn = release_pool.get()?;
                                             db::release_playlist_lock(&mut conn, &pln, &wid)?;
                                             Ok(())
                                         },
@@ -1046,13 +1021,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                                 match provider.ensure_playlist(&remote_display_name, "").await {
                                     Ok(new_id) => {
-                                        let db_path = cfg.db_path.clone();
+                                        let pool = db_pool.clone();
                                         let pl = playlist_name.clone();
                                         let prov = provider.name().to_string();
                                         let new_id_clone = new_id.clone();
                                         tokio::task::spawn_blocking(
                                             move || -> Result<(), anyhow::Error> {
-                                                let conn = rusqlite::Connection::open(db_path)?;
+                                                let conn = pool.get()?;
                                                 db::upsert_playlist_map(
                                                     &conn,
                                                     &prov,
@@ -1148,13 +1123,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             // folder rename. This prevents a subsequent run for the
                             // new logical name from calling ensure_playlist and
                             // creating a duplicate remote playlist.
-                            let db_path = cfg.db_path.clone();
+                            let pool = db_pool.clone();
                             let prov = provider.name().to_string();
                             let pl_from = playlist_name.clone();
                             let pl_to = to.clone();
                             let _ = tokio::task::spawn_blocking(
                                 move || -> Result<(), anyhow::Error> {
-                                    let conn = rusqlite::Connection::open(db_path)?;
+                                    let conn = pool.get()?;
                                     crate::db::migrate_playlist_map(
                                         &conn, &prov, &pl_from, &pl_to,
                                     )?;
@@ -1188,13 +1163,13 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                                 match provider.ensure_playlist(&new_remote_name, "").await {
                                     Ok(new_id) => {
-                                        let db_path = cfg.db_path.clone();
+                                        let pool = db_pool.clone();
                                         let pl = playlist_name.clone();
                                         let prov = provider.name().to_string();
                                         let new_id_clone = new_id.clone();
                                         tokio::task::spawn_blocking(
                                             move || -> Result<(), anyhow::Error> {
-                                                let conn = rusqlite::Connection::open(db_path)?;
+                                                let conn = pool.get()?;
                                                 db::upsert_playlist_map(
                                                     &conn,
                                                     &prov,
@@ -1350,10 +1325,10 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     // entry, we drop the operation entirely; the local playlist file
                     // is the golden source.
                     if tp.contains(':') && !tp.starts_with(&format!("{}:", provider.name())) {
-                        let db_path = cfg.db_path.clone();
+                        let pool = db_pool.clone();
                         let uri_clone = tp.clone();
                         if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
-                            let conn = rusqlite::Connection::open(db_path)?;
+                            let conn = pool.get()?;
                             Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
                         })
                         .await??
@@ -1378,11 +1353,11 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     // Try track cache first (with timestamp) to avoid unnecessary lookups
                     let cached: Option<(Option<String>, Option<String>, i64)> =
                         tokio::task::spawn_blocking({
-                            let db_path = cfg.db_path.clone();
+                            let pool = db_pool.clone();
                             let local_path = tp.clone();
                             let provider_name = provider.name().to_string();
                             move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
-                                let conn = rusqlite::Connection::open(db_path)?;
+                                let conn = pool.get()?;
                                 Ok(db::get_track_cache_by_local(&conn, &provider_name, &local_path)?)
                             }
                         })
@@ -1431,12 +1406,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         if let Some(code) = extracted {
                             isrc_for_lookup = Some(code.clone());
                             // persist locally extracted ISRC in cache (without remote id yet)
-                            let db_path = cfg.db_path.clone();
+                            let pool = db_pool.clone();
                             let local_path = tp.clone();
                             let code_for_cache = code.clone();
                             let provider_name = provider.name().to_string();
                             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                let conn = rusqlite::Connection::open(db_path)?;
+                                let conn = pool.get()?;
                                 let _ = crate::db::upsert_track_cache(
                                     &conn,
                                     &provider_name,
@@ -1459,14 +1434,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     _ => {}
                                 }
                                 // Persist cache with ISRC + resolved URI
-                                let db_path = cfg.db_path.clone();
+                                let pool = db_pool.clone();
                                 let local_path = tp.clone();
                                 let uri_clone = uri.clone();
                                 let isrc_for_cache = isrc.clone();
                                 let provider_name = provider.name().to_string();
                                 tokio::task::spawn_blocking(
                                     move || -> Result<(), anyhow::Error> {
-                                        let conn = rusqlite::Connection::open(db_path)?;
+                                        let conn = pool.get()?;
                                         let _ = crate::db::upsert_track_cache(
                                             &conn,
                                             &provider_name,
@@ -1563,7 +1538,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             _ => {}
                         }
                         // attempt to lookup ISRC from provider; persist resolved uri + isrc into track_cache
-                        let db_path = cfg.db_path.clone();
+                        let pool = db_pool.clone();
                         let local_path = tp.clone();
                         let uri_clone = uri.clone();
                         let provider_clone = provider.clone();
@@ -1573,7 +1548,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             .unwrap_or(None);
                         let provider_name = provider.name().to_string();
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let conn = rusqlite::Connection::open(db_path)?;
+                            let conn = pool.get()?;
                             let _ = crate::db::upsert_track_cache(
                                 &conn,
                                 &provider_name,
@@ -1593,12 +1568,12 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             tp
                         );
                         // record negative cache entry so we don't retry soon
-                        let db_path = cfg.db_path.clone();
+                        let pool = db_pool.clone();
                         let local_path_for_cache = tp.clone();
                         let provider_name_for_cache = provider.name().to_string();
                         let maybe_isrc = cached.as_ref().and_then(|(i,_,_)| i.clone());
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let conn = rusqlite::Connection::open(db_path)?;
+                            let conn = pool.get()?;
                             let _ = crate::db::upsert_track_cache(
                                 &conn,
                                 &provider_name_for_cache,
@@ -1641,6 +1616,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 is_add: bool,
                 cfg: &Config,
                 worker_id: &str,
+                db_pool: &db::DbPool,
             ) -> Result<()> {
                 if uris.is_empty() {
                     return Ok(());
@@ -1776,14 +1752,14 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                             .await
                                         {
                                             Ok(new_id) => {
-                                                let db_path = cfg.db_path.clone();
+                                                let pool = db_pool.clone();
                                                 let pl = playlist_name.to_string();
                                                 let prov = provider.name().to_string();
                                                 let new_id_clone = new_id.clone();
                                                 tokio::task::spawn_blocking(
                                                     move || -> Result<(), anyhow::Error> {
                                                         let conn =
-                                                            rusqlite::Connection::open(db_path)?;
+                                                            pool.get()?;
                                                         crate::db::upsert_playlist_map(
                                                             &conn,
                                                             &prov,
@@ -1886,6 +1862,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 false,
                 cfg,
                 &worker_id,
+                &db_pool,
             )
             .await
             {
@@ -1906,6 +1883,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 true,
                 cfg,
                 &worker_id,
+                &db_pool,
             )
             .await
             {
@@ -1920,9 +1898,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
             // Mark original events as synced (blocking)
             let ids_clone = original_ids.clone();
-            let db_path = cfg.db_path.clone();
+            let pool = db_pool.clone();
             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let mut conn = rusqlite::Connection::open(db_path)?;
+                let mut conn = pool.get()?;
                 if !ids_clone.is_empty() {
                     db::mark_events_synced(&mut conn, &ids_clone)?;
                 }
@@ -1931,9 +1909,9 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             .await??;
 
             // release lock
-            let (dbp, pln, wid) = release_on_exit.clone();
+            let (release_pool, pln, wid) = release_on_exit.clone();
             let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let mut conn = rusqlite::Connection::open(dbp)?;
+                let mut conn = release_pool.get()?;
                 db::release_playlist_lock(&mut conn, &pln, &wid)?;
                 Ok(())
             })
@@ -1970,6 +1948,7 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
         Some(&cfg.file_extensions),
     )?;
     // collect thread handles for the enqueue operations so we can join before returning
+    let db_pool = db::create_pool(&cfg.db_path)?;
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
     for (folder, _node) in tree.nodes.iter() {
         // Extra safety: respect the folder whitelist again here before
@@ -2031,9 +2010,9 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
 
         // enqueue Create event in a background thread but keep the handle to join
         let pname = rel.display().to_string();
-        let db_path = cfg.db_path.clone();
+        let pool = db_pool.clone();
         let h = std::thread::spawn(move || {
-            if let Ok(conn) = crate::db::open_or_create(std::path::Path::new(&db_path)) {
+            if let Ok(conn) = pool.get() {
                 if let Err(e) = crate::db::enqueue_event(
                     &conn,
                     &pname,
@@ -2048,7 +2027,7 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
                     );
                 }
             } else {
-                log::warn!("Failed to open DB to enqueue nightly event");
+                log::warn!("Failed to get pooled connection to enqueue nightly event");
             }
         });
         handles.push(h);

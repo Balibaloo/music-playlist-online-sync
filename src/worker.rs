@@ -67,6 +67,7 @@ pub async fn desired_remote_uris_for_playlist(
     playlist_name: &str,
     provider: Arc<dyn Provider>,
     db_pool: &db::DbPool,
+    trust_cache: bool,
 ) -> Result<Vec<String>> {
     use std::io::BufRead;
 
@@ -109,7 +110,7 @@ pub async fn desired_remote_uris_for_playlist(
     let file_size = meta.len() as i64;
     let file_hash = crate::util::hash_file(&playlist_path)?;
 
-    // check playlist cache; if the file is unchanged we can return early
+    // check playlist cache; if the file is unchanged (or --use-cache is set) we can return early
     if let Some((cached_mtime, cached_size, cached_hash, uris_json)) = {
         let pool = db_pool.clone();
         let playlist_name = playlist_name.to_string();
@@ -120,7 +121,11 @@ pub async fn desired_remote_uris_for_playlist(
         })
         .await??
     } {
-        if cached_mtime == file_mtime && cached_size == file_size && cached_hash == file_hash {
+        let cache_valid = cached_mtime == file_mtime && cached_size == file_size && cached_hash == file_hash;
+        if cache_valid || trust_cache {
+            if trust_cache && !cache_valid {
+                log::debug!("trust_cache=true: trusting stale playlist cache for {}", playlist_name);
+            }
             // parse the cached JSON and return
             let uris: Vec<String> = serde_json::from_str(&uris_json).unwrap_or_default();
             return Ok(uris);
@@ -727,7 +732,7 @@ async fn apply_in_batches(
     Ok(())
 }
 
-pub async fn run_worker_once(cfg: &Config) -> Result<()> {
+pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
     let worker_id = Uuid::new_v4().to_string();
 
     // Create a connection pool and run migrations once.
@@ -1078,7 +1083,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     pl_tag,
                     log_phase_tag("RESOLVE")
                 );
-                match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone(), &db_pool).await {
+                match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone(), &db_pool, trust_cache).await {
                     Ok(desired) => {
                         log::info!(
                             "{} {} {} reconcile_desired_uris_computed count={}",
@@ -1148,7 +1153,16 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             // still a valid, accessible playlist. This covers the case where the
             // user "deletes" (unfollows) a Spotify playlist in the client while
             // our local mapping still points at the old id.
+            // Skipped when trust_cache is set: the stored remote_id is trusted as-is.
             // verify playlist validity, retrying on transient errors (429/rate limit)
+            if trust_cache {
+                log::debug!(
+                    "{} {} {} trust_cache: skipping playlist_is_valid",
+                    log_run_tag(&worker_id),
+                    pl_tag,
+                    log_phase_tag("REMOTE_ID")
+                );
+            } else {
             {
                 let mut attempt = 0u32;
                 loop {
@@ -1269,6 +1283,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     }
                 }
             }
+            } // end else !trust_cache
 
             // If there was no explicit rename event for this playlist, still
             // ensure that the remote playlist's display name matches what we
@@ -1605,47 +1620,113 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             let mut add_uris: Vec<String> = Vec::new();
             let mut remove_uris: Vec<String> = Vec::new();
             if let Some(desired) = reconcile_desired.take() {
-                match provider.list_playlist_tracks(&remote_id).await {
-                    Ok(remote_current) => {
-                        use std::collections::HashSet;
-                        let desired_set: HashSet<String> = desired.into_iter().collect();
-                        let remote_set: HashSet<String> = remote_current.into_iter().collect();
-
-                        let to_add: Vec<String> =
-                            desired_set.difference(&remote_set).cloned().collect();
-                        let to_remove: Vec<String> =
-                            remote_set.difference(&desired_set).cloned().collect();
-
-                        if !to_add.is_empty() {
-                            log::info!(
-                                "{} {} {} reconcile_missing_tracks scheduling_adds={} ",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("RECONCILE"),
-                                to_add.len()
-                            );
-                            add_uris.extend(to_add);
+                // Fetch current remote contents: use the cache when trust_cache is
+                // set and a matching entry exists; otherwise hit the provider live
+                // and always write the result back to the cache.
+                let remote_current_opt: Option<Vec<String>> = if trust_cache {
+                    let cached = tokio::task::spawn_blocking({
+                        let pool = db_pool.clone();
+                        let prov = provider_name.clone();
+                        let pl = playlist_name.clone();
+                        move || -> Result<Option<(String, String)>, anyhow::Error> {
+                            let conn = pool.get()?;
+                            Ok(db::get_remote_playlist_contents_cache(&conn, &prov, &pl)?)
                         }
-
-                        if !to_remove.is_empty() {
+                    })
+                    .await??;
+                    match cached {
+                        Some((cached_remote_id, uris_json)) if cached_remote_id == remote_id => {
                             log::info!(
-                                "{} {} {} reconcile_extra_tracks scheduling_removes={} ",
+                                "{} {} {} trust_cache: using cached remote_contents count={}",
                                 log_run_tag(&worker_id),
                                 pl_tag,
                                 log_phase_tag("RECONCILE"),
-                                to_remove.len()
+                                serde_json::from_str::<Vec<String>>(&uris_json)
+                                    .map(|v| v.len())
+                                    .unwrap_or(0)
                             );
-                            remove_uris.extend(to_remove);
+                            Some(serde_json::from_str(&uris_json).unwrap_or_default())
+                        }
+                        _ => {
+                            log::debug!(
+                                "{} {} {} trust_cache: no matching remote_contents cache, fetching live",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RECONCILE")
+                            );
+                            None
                         }
                     }
-                    Err(e) => {
-                        log::warn!(
-                            "{} {} {} reconcile_list_remote_failed error={}",
+                } else {
+                    None
+                };
+
+                let remote_current_opt = if remote_current_opt.is_some() {
+                    remote_current_opt
+                } else {
+                    match provider.list_playlist_tracks(&remote_id).await {
+                        Ok(remote_current) => {
+                            // Always persist the live response so future runs
+                            // with --trust-cache can skip this request.
+                            let uris_json = serde_json::to_string(&remote_current)
+                                .unwrap_or_default();
+                            let pool = db_pool.clone();
+                            let prov = provider_name.clone();
+                            let pl = playlist_name.clone();
+                            let rid = remote_id.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(conn) = pool.get() {
+                                    let _ = db::upsert_remote_playlist_contents_cache(
+                                        &conn, &prov, &pl, &rid, &uris_json,
+                                    );
+                                }
+                            })
+                            .await;
+                            Some(remote_current)
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "{} {} {} reconcile_list_remote_failed error={}",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RECONCILE"),
+                                e
+                            );
+                            None
+                        }
+                    }
+                };
+
+                if let Some(remote_current) = remote_current_opt {
+                    use std::collections::HashSet;
+                    let desired_set: HashSet<String> = desired.into_iter().collect();
+                    let remote_set: HashSet<String> = remote_current.into_iter().collect();
+
+                    let to_add: Vec<String> =
+                        desired_set.difference(&remote_set).cloned().collect();
+                    let to_remove: Vec<String> =
+                        remote_set.difference(&desired_set).cloned().collect();
+
+                    if !to_add.is_empty() {
+                        log::info!(
+                            "{} {} {} reconcile_missing_tracks scheduling_adds={} ",
                             log_run_tag(&worker_id),
                             pl_tag,
                             log_phase_tag("RECONCILE"),
-                            e
+                            to_add.len()
                         );
+                        add_uris.extend(to_add);
+                    }
+
+                    if !to_remove.is_empty() {
+                        log::info!(
+                            "{} {} {} reconcile_extra_tracks scheduling_removes={} ",
+                            log_run_tag(&worker_id),
+                            pl_tag,
+                            log_phase_tag("RECONCILE"),
+                            to_remove.len()
+                        );
+                        remove_uris.extend(to_remove);
                     }
                 }
             }

@@ -104,6 +104,19 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         [],
     );
 
+    // Ensure the remote_playlist_contents_cache table exists.  It may be
+    // absent in databases created before this feature was added.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_playlist_contents_cache ( \
+           provider_name TEXT NOT NULL, \
+           playlist_name TEXT NOT NULL, \
+           remote_id TEXT NOT NULL, \
+           uris TEXT NOT NULL, \
+           cached_at INTEGER NOT NULL, \
+           PRIMARY KEY (provider_name, playlist_name) \
+         );",
+    );
+
     // Historically playlist_map stored bare playlist_name keys for Spotify.
     // We now uniformly prefix every key with "<provider>::".  Migrate any
     // remaining bare keys by prefixing them with "spotify::".
@@ -432,6 +445,49 @@ pub fn upsert_playlist_cache(
     conn.execute(
         "INSERT INTO playlist_cache (playlist_name, provider_name, file_mtime, file_size, file_hash, uris) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(playlist_name, provider_name) DO UPDATE SET file_mtime = excluded.file_mtime, file_size = excluded.file_size, file_hash = excluded.file_hash, uris = excluded.uris",
         params![playlist_name, provider, file_mtime, file_size, file_hash, uris_json],
+    )?;
+    Ok(())
+}
+
+/// Get the cached remote playlist contents (list of URIs) for a given provider
+/// and playlist.  Returns (remote_id, uris_json) when a cache entry exists.
+pub fn get_remote_playlist_contents_cache(
+    conn: &Connection,
+    provider: &str,
+    playlist_name: &str,
+) -> Result<Option<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT remote_id, uris FROM remote_playlist_contents_cache \
+         WHERE provider_name = ?1 AND playlist_name = ?2 LIMIT 1",
+    )?;
+    let row = stmt
+        .query_row(params![provider, playlist_name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .optional()?;
+    Ok(row)
+}
+
+/// Upsert the cached remote playlist contents for a given provider and
+/// playlist.  Called after every successful list_playlist_tracks response so
+/// that subsequent runs with --trust-cache can skip the live request.
+pub fn upsert_remote_playlist_contents_cache(
+    conn: &Connection,
+    provider: &str,
+    playlist_name: &str,
+    remote_id: &str,
+    uris_json: &str,
+) -> Result<()> {
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO remote_playlist_contents_cache \
+         (provider_name, playlist_name, remote_id, uris, cached_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(provider_name, playlist_name) DO UPDATE SET \
+         remote_id = excluded.remote_id, \
+         uris = excluded.uris, \
+         cached_at = excluded.cached_at",
+        params![provider, playlist_name, remote_id, uris_json, now],
     )?;
     Ok(())
 }

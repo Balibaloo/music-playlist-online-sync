@@ -27,7 +27,12 @@ enum Commands {
     /// Run the watcher (long-running)
     Watcher,
     /// Run the worker once (one-shot)
-    Worker,
+    Worker {
+        /// Trust the track/playlist cache even if the files have changed on disk.
+        /// Useful when running Create events and you know the cache is still valid.
+        #[arg(long)]
+        trust_cache: bool,
+    },
     /// Run a full reconciliation scan of the root folder
     Reconcile,
     /// Validate config file and exit
@@ -201,8 +206,8 @@ async fn main() -> Result<()> {
         Commands::Watcher => {
             lib::watcher::run_watcher(&cfg).with_context(|| "running watcher".to_string())?;
         }
-        Commands::Worker => {
-            lib::worker::run_worker_once(&cfg)
+        Commands::Worker { trust_cache } => {
+            lib::worker::run_worker_once(&cfg, trust_cache)
                 .await
                 .with_context(|| "running worker".to_string())?;
         }

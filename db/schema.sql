@@ -55,6 +55,19 @@ CREATE TABLE IF NOT EXISTS credentials (
   last_refreshed INTEGER
 );
 
+-- Remote playlist contents cache: stores the last known set of URIs on the
+-- remote provider for each playlist.  Always populated after a successful
+-- list_playlist_tracks call; consulted instead of a live request when
+-- --trust-cache is set.
+CREATE TABLE IF NOT EXISTS remote_playlist_contents_cache (
+  provider_name TEXT NOT NULL,
+  playlist_name TEXT NOT NULL,
+  remote_id TEXT NOT NULL,
+  uris TEXT NOT NULL,
+  cached_at INTEGER NOT NULL,
+  PRIMARY KEY (provider_name, playlist_name)
+);
+
 -- processing locks (per-playlist worker lease)
 CREATE TABLE IF NOT EXISTS processing_locks (
   playlist_name TEXT PRIMARY KEY,

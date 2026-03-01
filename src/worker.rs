@@ -41,6 +41,20 @@ async fn mark_events_synced_async(pool: db::DbPool, ids: Vec<i64>) -> Result<()>
     Ok(())
 }
 
+/// Release a playlist processing lock in a background blocking task.
+/// Ignores errors so callers can use this in error-recovery paths.
+async fn release_lock_async(pool: &db::DbPool, playlist_name: &str, worker_id: &str) {
+    let pool = pool.clone();
+    let pln = playlist_name.to_string();
+    let wid = worker_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+        let mut conn = pool.get()?;
+        db::release_playlist_lock(&mut conn, &pln, &wid)?;
+        Ok(())
+    })
+    .await;
+}
+
 /// Compute the set of remote track URIs that should be present for a playlist
 /// based on the current local playlist file contents.
 ///
@@ -453,6 +467,255 @@ fn compute_remote_playlist_name(cfg: &Config, _provider_name: &str, playlist_key
 
 /// Worker orchestration: read unsynced events, group by playlist, collapse, apply rename then track adds/removes.
 /// Adds per-playlist processing lease to avoid concurrent workers processing the same playlist.
+// Helper to apply batches with retry/backoff and 429 handling.
+// If the remote playlist is reported as missing (e.g. deleted on the
+// provider side), we will recreate it and update the playlist_map,
+// then retry the batch once with the new playlist id.
+async fn apply_in_batches(
+    provider: Arc<dyn Provider>,
+    playlist_id: &mut String,
+    playlist_name: &str,
+    remote_display_name: &str,
+    uris: Vec<String>,
+    is_add: bool,
+    cfg: &Config,
+    worker_id: &str,
+    db_pool: &db::DbPool,
+) -> Result<()> {
+    if uris.is_empty() {
+        return Ok(());
+    }
+    // choose an appropriate batch size for the provider
+    // we call.  Spotify tolerates large payloads (configurable),
+    // but Tidal is strictly limited to 1–20 items per request
+    // according to their API.  Applying the provider-specific
+    // cap here prevents 400 errors such as
+    // "size must be between 1 and 20" which were flooding the
+    // logs.
+    let batch_size = provider.max_batch_size(cfg);
+    for chunk in uris.chunks(batch_size) {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let res = if is_add {
+                provider.add_tracks(playlist_id, chunk).await
+            } else {
+                provider.remove_tracks(playlist_id, chunk).await
+            };
+            match res {
+                Ok(_) => {
+                    let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                    log::info!(
+                        "{} {} {} batch_applied size={} id={}",
+                        log_run_tag(worker_id),
+                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                        log_phase_tag(phase),
+                        chunk.len(),
+                        playlist_id
+                    );
+                    break;
+                }
+                Err(e) => {
+                    let s = format!("{}", e);
+                    // Parse retry_after if provider included it in the error string like `retry_after=Some(5)`
+                    let retry_after_secs = s
+                        .split("retry_after=")
+                        .nth(1)
+                        .and_then(|rest| {
+                            // rest might be like "Some(5)" or "None" or "5"
+                            let token = rest.trim();
+                            if token.starts_with("Some(") {
+                                token.trim_start_matches("Some(").split(')').next()
+                            } else if token.starts_with("None") {
+                                None
+                            } else {
+                                // take digits prefix
+                                Some(
+                                    token
+                                        .split(|c: char| !c.is_digit(10))
+                                        .next()
+                                        .unwrap_or("")
+                                        .trim(),
+                                )
+                            }
+                        })
+                        .and_then(|s| s.parse::<u64>().ok());
+
+                    if s.contains("rate_limited") || retry_after_secs.is_some() {
+                        let wait = retry_after_secs.unwrap_or_else(|| {
+                            // exponential backoff cap 60s
+                            let exp = 2u64.saturating_pow(std::cmp::min(attempt, 6));
+                            std::cmp::min(exp, 60)
+                        });
+                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                        log::warn!(
+                            "{} {} {} rate_limited wait_s={} error={}",
+                            log_run_tag(worker_id),
+                            log_playlist_tag(
+                                playlist_name,
+                                &provider.name().to_string()
+                            ),
+                            log_phase_tag(phase),
+                            wait,
+                            e
+                        );
+                        // also log the actual sleep duration so it's easy to spot in
+                        // the logs when a 429 triggers backoff
+                        log::info!(
+                            "{} {} {} Sleeping for {} seconds",
+                            log_run_tag(worker_id),
+                            log_playlist_tag(
+                                playlist_name,
+                                &provider.name().to_string()
+                            ),
+                            log_phase_tag(phase),
+                            wait + 1
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(wait + 1))
+                            .await;
+                        // continue retrying until max_retries_on_error
+                        if attempt >= cfg.max_retries_on_error {
+                            let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                            log::error!(
+                                "{} {} {} rate_limit_give_up attempts={} error={}",
+                                log_run_tag(worker_id),
+                                log_playlist_tag(
+                                    playlist_name,
+                                    &provider.name().to_string()
+                                ),
+                                log_phase_tag(phase),
+                                attempt,
+                                e
+                            );
+                            break;
+                        }
+                        continue;
+                    } else {
+                        // Special handling: if the provider reports that the
+                        // playlist id no longer exists, recreate it and retry
+                        // this batch once with the new id.
+                        if s.contains("tidal add tracks failed: 404 Not Found")
+                            && s.contains("Playlists with id")
+                        {
+                            let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                            log::warn!(
+                                "{} {} {} playlist_missing_for_batch id={}",
+                                log_run_tag(worker_id),
+                                log_playlist_tag(
+                                    playlist_name,
+                                    &provider.name().to_string()
+                                ),
+                                log_phase_tag(phase),
+                                playlist_id
+                            );
+
+                            // Recreate the playlist via ensure_playlist using the
+                            // current display name, then update playlist_map.
+                            match provider
+                                .ensure_playlist(remote_display_name, "")
+                                .await
+                            {
+                                Ok(new_id) => {
+                                    let pool = db_pool.clone();
+                                    let pl = playlist_name.to_string();
+                                    let prov = provider.name().to_string();
+                                    let new_id_clone = new_id.clone();
+                                    tokio::task::spawn_blocking(
+                                        move || -> Result<(), anyhow::Error> {
+                                            let conn =
+                                                pool.get()?;
+                                            crate::db::upsert_playlist_map(
+                                                &conn,
+                                                &prov,
+                                                &pl,
+                                                &new_id_clone,
+                                            )?;
+                                            Ok(())
+                                        },
+                                    )
+                                    .await??;
+
+                                    *playlist_id = new_id;
+                                    let phase =
+                                        if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                    log::info!(
+                                        "{} {} {} playlist_recreated_for_batch new_id={}",
+                                        log_run_tag(worker_id),
+                                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                        log_phase_tag(phase),
+                                        playlist_id
+                                    );
+
+                                    // Reset attempts and retry the current chunk with
+                                    // the fresh playlist id.
+                                    attempt = 0;
+                                    continue;
+                                }
+                                Err(err) => {
+                                    let phase =
+                                        if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                    log::error!(
+                                        "{} {} {} playlist_recreate_for_batch_failed error={}",
+                                        log_run_tag(worker_id),
+                                        log_playlist_tag(playlist_name, &provider.name().to_string()),
+                                        log_phase_tag(phase),
+                                        err
+                                    );
+                                    return Err(err);
+                                }
+                            }
+                        }
+                        if attempt >= cfg.max_retries_on_error {
+                            let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                            log::error!(
+                                "{} {} {} batch_give_up attempts={} error={}",
+                                log_run_tag(worker_id),
+                                log_playlist_tag(
+                                    playlist_name,
+                                    &provider.name().to_string()
+                                ),
+                                log_phase_tag(phase),
+                                attempt,
+                                e
+                            );
+                            break;
+                        } else {
+                            let exp = std::cmp::min(1u64 << attempt, 60);
+                            let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                            log::warn!(
+                                "{} {} {} batch_retry attempt={} error={} backoff_s={}",
+                                log_run_tag(worker_id),
+                                log_playlist_tag(
+                                    playlist_name,
+                                    &provider.name().to_string()
+                                ),
+                                log_phase_tag(phase),
+                                attempt,
+                                e,
+                                exp
+                            );
+                            log::info!(
+                                "{} {} {} Sleeping for {} seconds",
+                                log_run_tag(worker_id),
+                                log_playlist_tag(
+                                    playlist_name,
+                                    &provider.name().to_string()
+                                ),
+                                log_phase_tag(phase),
+                                exp
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(exp))
+                                .await;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_worker_once(cfg: &Config) -> Result<()> {
     let worker_id = Uuid::new_v4().to_string();
 
@@ -594,13 +857,6 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 );
                 continue;
             }
-
-            // Ensure we release lock at end
-            let release_on_exit = (
-                db_pool.clone(),
-                playlist_name.clone(),
-                worker_id.clone(),
-            );
 
             // Collapse events
             let collapsed = collapse_events(evs);
@@ -750,13 +1006,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 .await??;
 
                 // release lock
-                let (release_pool, pln, wid) = release_on_exit.clone();
-                let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let mut conn = release_pool.get()?;
-                    db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                    Ok(())
-                })
-                .await?;
+                release_lock_async(&db_pool, playlist_name, &worker_id).await;
 
                 log::info!(
                     "{} {} {} playlist_deleted_and_events_synced count={}",
@@ -846,14 +1096,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                             e
                         );
                         // release lock and continue
-                        let (release_pool, pln, wid) = release_on_exit.clone();
-                        let _ =
-                            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                let mut conn = release_pool.get()?;
-                                let _ = db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                                Ok(())
-                            })
-                            .await;
+                        release_lock_async(&db_pool, playlist_name, &worker_id).await;
                         continue;
                     }
                 }
@@ -909,15 +1152,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                                     );
 
                                     // Release lock and skip further processing for this playlist.
-                                    let (release_pool, pln, wid) = release_on_exit.clone();
-                                    let _ = tokio::task::spawn_blocking(
-                                        move || -> Result<(), anyhow::Error> {
-                                            let mut conn = release_pool.get()?;
-                                            db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                                            Ok(())
-                                        },
-                                    )
-                                    .await;
+                                    release_lock_async(&db_pool, playlist_name, &worker_id).await;
                                     continue;
                                 }
                             }
@@ -1603,254 +1838,6 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 remove_uris.retain(|u| seen.insert(u.clone()));
             }
 
-            // Helper to apply batches with retry/backoff and 429 handling.
-            // If the remote playlist is reported as missing (e.g. deleted on the
-            // provider side), we will recreate it and update the playlist_map,
-            // then retry the batch once with the new playlist id.
-            async fn apply_in_batches(
-                provider: Arc<dyn Provider>,
-                playlist_id: &mut String,
-                playlist_name: &str,
-                remote_display_name: &str,
-                uris: Vec<String>,
-                is_add: bool,
-                cfg: &Config,
-                worker_id: &str,
-                db_pool: &db::DbPool,
-            ) -> Result<()> {
-                if uris.is_empty() {
-                    return Ok(());
-                }
-                // choose an appropriate batch size for the provider
-                // we call.  Spotify tolerates large payloads (configurable),
-                // but Tidal is strictly limited to 1–20 items per request
-                // according to their API.  Applying the provider-specific
-                // cap here prevents 400 errors such as
-                // "size must be between 1 and 20" which were flooding the
-                // logs.
-                let batch_size = provider.max_batch_size(cfg);
-                for chunk in uris.chunks(batch_size) {
-                    let mut attempt = 0u32;
-                    loop {
-                        attempt += 1;
-                        let res = if is_add {
-                            provider.add_tracks(playlist_id, chunk).await
-                        } else {
-                            provider.remove_tracks(playlist_id, chunk).await
-                        };
-                        match res {
-                            Ok(_) => {
-                                let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                log::info!(
-                                    "{} {} {} batch_applied size={} id={}",
-                                    log_run_tag(worker_id),
-                                    log_playlist_tag(playlist_name, &provider.name().to_string()),
-                                    log_phase_tag(phase),
-                                    chunk.len(),
-                                    playlist_id
-                                );
-                                break;
-                            }
-                            Err(e) => {
-                                let s = format!("{}", e);
-                                // Parse retry_after if provider included it in the error string like `retry_after=Some(5)`
-                                let retry_after_secs = s
-                                    .split("retry_after=")
-                                    .nth(1)
-                                    .and_then(|rest| {
-                                        // rest might be like "Some(5)" or "None" or "5"
-                                        let token = rest.trim();
-                                        if token.starts_with("Some(") {
-                                            token.trim_start_matches("Some(").split(')').next()
-                                        } else if token.starts_with("None") {
-                                            None
-                                        } else {
-                                            // take digits prefix
-                                            Some(
-                                                token
-                                                    .split(|c: char| !c.is_digit(10))
-                                                    .next()
-                                                    .unwrap_or("")
-                                                    .trim(),
-                                            )
-                                        }
-                                    })
-                                    .and_then(|s| s.parse::<u64>().ok());
-
-                                if s.contains("rate_limited") || retry_after_secs.is_some() {
-                                    let wait = retry_after_secs.unwrap_or_else(|| {
-                                        // exponential backoff cap 60s
-                                        let exp = 2u64.saturating_pow(std::cmp::min(attempt, 6));
-                                        std::cmp::min(exp, 60)
-                                    });
-                                    let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                    log::warn!(
-                                        "{} {} {} rate_limited wait_s={} error={}",
-                                        log_run_tag(worker_id),
-                                        log_playlist_tag(
-                                            playlist_name,
-                                            &provider.name().to_string()
-                                        ),
-                                        log_phase_tag(phase),
-                                        wait,
-                                        e
-                                    );
-                                    // also log the actual sleep duration so it's easy to spot in
-                                    // the logs when a 429 triggers backoff
-                                    log::info!(
-                                        "{} {} {} Sleeping for {} seconds",
-                                        log_run_tag(worker_id),
-                                        log_playlist_tag(
-                                            playlist_name,
-                                            &provider.name().to_string()
-                                        ),
-                                        log_phase_tag(phase),
-                                        wait + 1
-                                    );
-                                    tokio::time::sleep(std::time::Duration::from_secs(wait + 1))
-                                        .await;
-                                    // continue retrying until max_retries_on_error
-                                    if attempt >= cfg.max_retries_on_error {
-                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                        log::error!(
-                                            "{} {} {} rate_limit_give_up attempts={} error={}",
-                                            log_run_tag(worker_id),
-                                            log_playlist_tag(
-                                                playlist_name,
-                                                &provider.name().to_string()
-                                            ),
-                                            log_phase_tag(phase),
-                                            attempt,
-                                            e
-                                        );
-                                        break;
-                                    }
-                                    continue;
-                                } else {
-                                    // Special handling: if the provider reports that the
-                                    // playlist id no longer exists, recreate it and retry
-                                    // this batch once with the new id.
-                                    if s.contains("tidal add tracks failed: 404 Not Found")
-                                        && s.contains("Playlists with id")
-                                    {
-                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                        log::warn!(
-                                            "{} {} {} playlist_missing_for_batch id={}",
-                                            log_run_tag(worker_id),
-                                            log_playlist_tag(
-                                                playlist_name,
-                                                &provider.name().to_string()
-                                            ),
-                                            log_phase_tag(phase),
-                                            playlist_id
-                                        );
-
-                                        // Recreate the playlist via ensure_playlist using the
-                                        // current display name, then update playlist_map.
-                                        match provider
-                                            .ensure_playlist(remote_display_name, "")
-                                            .await
-                                        {
-                                            Ok(new_id) => {
-                                                let pool = db_pool.clone();
-                                                let pl = playlist_name.to_string();
-                                                let prov = provider.name().to_string();
-                                                let new_id_clone = new_id.clone();
-                                                tokio::task::spawn_blocking(
-                                                    move || -> Result<(), anyhow::Error> {
-                                                        let conn =
-                                                            pool.get()?;
-                                                        crate::db::upsert_playlist_map(
-                                                            &conn,
-                                                            &prov,
-                                                            &pl,
-                                                            &new_id_clone,
-                                                        )?;
-                                                        Ok(())
-                                                    },
-                                                )
-                                                .await??;
-
-                                                *playlist_id = new_id;
-                                                let phase =
-                                                    if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                                log::info!(
-                                                    "{} {} {} playlist_recreated_for_batch new_id={}",
-                                                    log_run_tag(worker_id),
-                                                    log_playlist_tag(playlist_name, &provider.name().to_string()),
-                                                    log_phase_tag(phase),
-                                                    playlist_id
-                                                );
-
-                                                // Reset attempts and retry the current chunk with
-                                                // the fresh playlist id.
-                                                attempt = 0;
-                                                continue;
-                                            }
-                                            Err(err) => {
-                                                let phase =
-                                                    if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                                log::error!(
-                                                    "{} {} {} playlist_recreate_for_batch_failed error={}",
-                                                    log_run_tag(worker_id),
-                                                    log_playlist_tag(playlist_name, &provider.name().to_string()),
-                                                    log_phase_tag(phase),
-                                                    err
-                                                );
-                                                return Err(err);
-                                            }
-                                        }
-                                    }
-                                    if attempt >= cfg.max_retries_on_error {
-                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                        log::error!(
-                                            "{} {} {} batch_give_up attempts={} error={}",
-                                            log_run_tag(worker_id),
-                                            log_playlist_tag(
-                                                playlist_name,
-                                                &provider.name().to_string()
-                                            ),
-                                            log_phase_tag(phase),
-                                            attempt,
-                                            e
-                                        );
-                                        break;
-                                    } else {
-                                        let exp = std::cmp::min(1u64 << attempt, 60);
-                                        let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
-                                        log::warn!(
-                                            "{} {} {} batch_retry attempt={} error={} backoff_s={}",
-                                            log_run_tag(worker_id),
-                                            log_playlist_tag(
-                                                playlist_name,
-                                                &provider.name().to_string()
-                                            ),
-                                            log_phase_tag(phase),
-                                            attempt,
-                                            e,
-                                            exp
-                                        );
-                                        log::info!(
-                                            "{} {} {} Sleeping for {} seconds",
-                                            log_run_tag(worker_id),
-                                            log_playlist_tag(
-                                                playlist_name,
-                                                &provider.name().to_string()
-                                            ),
-                                            log_phase_tag(phase),
-                                            exp
-                                        );
-                                        tokio::time::sleep(std::time::Duration::from_secs(exp))
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
 
             let provider_arc = provider.clone();
             if let Err(e) = apply_in_batches(
@@ -1909,13 +1896,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             .await??;
 
             // release lock
-            let (release_pool, pln, wid) = release_on_exit.clone();
-            let _ = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let mut conn = release_pool.get()?;
-                db::release_playlist_lock(&mut conn, &pln, &wid)?;
-                Ok(())
-            })
-            .await?;
+            release_lock_async(&db_pool, playlist_name, &worker_id).await;
 
             log::info!(
                 "{} {} {} playlist_processed events_synced={}",

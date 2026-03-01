@@ -460,8 +460,7 @@ async fn main() -> Result<()> {
                 Ok(conn) => match music_file_playlist_online_sync::db::fetch_unsynced_events(&conn)
                 {
                     Ok(events) => {
-                        println!("Queue contains {} unsynced event(s):", events.len());
-                        for event in events {
+                        for event in &events {
                             println!(
                                 "- id: {} | playlist: {} | action: {:?} | track: {:?} | extra: {:?} | synced: {} | ts: {}",
                                 event.id,
@@ -473,6 +472,7 @@ async fn main() -> Result<()> {
                                 event.timestamp_ms
                             );
                         }
+                        println!("Queue contains {} unsynced event(s).", events.len());
                     }
                     Err(e) => {
                         eprintln!("Failed to fetch queue events: {}", e);

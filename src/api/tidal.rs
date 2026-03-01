@@ -1142,27 +1142,36 @@ impl Provider for TidalProvider {
             "{}/playlists/{}/relationships/items?countryCode={}",
             base, playlist_id, cc
         );
-        let body = json!({ "data": data });
-        let resp = self
-            .client
-            .delete(&url)
-            .header(AUTHORIZATION, &bearer)
-            .header(CONTENT_TYPE, "application/vnd.tidal.v1+json")
-            .json(&body)
-            .send()
-            .await?;
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
-        }
-        let status = resp.status();
-        if !status.is_success() {
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("tidal remove tracks failed: {} => {}", status, txt));
+
+        // The TIDAL API enforces a strict maximum of 20 items per DELETE
+        // request.  Because one input URI can fan out into multiple `data`
+        // entries (e.g. duplicate tracks have separate itemIds), the final
+        // payload may exceed 20 even when the caller only passed ≤20 URIs.
+        // Chunk the data array to stay within the limit.
+        const TIDAL_DELETE_MAX: usize = 20;
+        for chunk in data.chunks(TIDAL_DELETE_MAX) {
+            let body = json!({ "data": chunk });
+            let resp = self
+                .client
+                .delete(&url)
+                .header(AUTHORIZATION, &bearer)
+                .header(CONTENT_TYPE, "application/vnd.tidal.v1+json")
+                .json(&body)
+                .send()
+                .await?;
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                return Err(anyhow!("rate_limited: retry_after={:?}", retry_after));
+            }
+            let status = resp.status();
+            if !status.is_success() {
+                let txt = resp.text().await.unwrap_or_default();
+                return Err(anyhow!("tidal remove tracks failed: {} => {}", status, txt));
+            }
         }
         Ok(())
     }

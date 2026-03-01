@@ -59,6 +59,10 @@ enum Commands {
         /// Dry run: list matching playlists but do not delete anything
         #[arg(long)]
         dry_run: bool,
+
+        /// Only delete playlists that are NOT referenced in the local playlist_map DB
+        #[arg(long)]
+        orphan_only: bool,
     },
     /// Troubleshooting helpers
     Troubleshoot {
@@ -505,8 +509,10 @@ async fn main() -> Result<()> {
             provider,
             name_regex,
             dry_run,
+            orphan_only,
         } => {
             use regex::Regex;
+            use std::collections::HashSet;
             use std::sync::Arc;
 
             let re = match Regex::new(&name_regex) {
@@ -518,6 +524,31 @@ async fn main() -> Result<()> {
             };
 
             let provider_lc = provider.to_ascii_lowercase();
+
+            // When --orphan-only is set, load all remote_ids tracked locally
+            // so we can exclude them from deletion.
+            let tracked_ids: HashSet<String> = if orphan_only {
+                match rusqlite::Connection::open(&cfg.db_path) {
+                    Ok(conn) => {
+                        match music_file_playlist_online_sync::db::get_all_remote_ids_for_provider(&conn, &provider_lc) {
+                            Ok(ids) => {
+                                println!("Loaded {} locally-tracked remote ID(s) for '{}' (will be excluded).", ids.len(), provider_lc);
+                                ids
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to query local playlist_map: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to open DB: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                HashSet::new()
+            };
 
             match provider_lc.as_str() {
                 "spotify" => {
@@ -544,12 +575,21 @@ async fn main() -> Result<()> {
                         .filter(|(_id, name)| re.is_match(name))
                         .collect();
 
+                    if orphan_only {
+                        let before = matches.len();
+                        matches.retain(|(id, _name)| !tracked_ids.contains(id));
+                        let skipped = before - matches.len();
+                        if skipped > 0 {
+                            println!("Skipped {} locally-tracked playlist(s).", skipped);
+                        }
+                    }
+
                     if matches.is_empty() {
-                        println!("No Spotify playlists matched regex '{}'.", name_regex);
+                        println!("No Spotify playlists matched regex '{}'{}", name_regex, if orphan_only { " (after excluding locally-tracked)." } else { "." });
                         return Ok(());
                     }
 
-                    println!("Matched {} Spotify playlist(s):", matches.len());
+                    println!("Matched {} Spotify orphan playlist(s):", matches.len());
                     for (id, name) in &matches {
                         println!("- {} ({})", name, id);
                     }
@@ -614,12 +654,21 @@ async fn main() -> Result<()> {
                         .filter(|(_id, name)| re.is_match(name))
                         .collect();
 
+                    if orphan_only {
+                        let before = matches.len();
+                        matches.retain(|(id, _name)| !tracked_ids.contains(id));
+                        let skipped = before - matches.len();
+                        if skipped > 0 {
+                            println!("Skipped {} locally-tracked playlist(s).", skipped);
+                        }
+                    }
+
                     if matches.is_empty() {
-                        println!("No Tidal playlists matched regex '{}'.", name_regex);
+                        println!("No Tidal playlists matched regex '{}'{}", name_regex, if orphan_only { " (after excluding locally-tracked)." } else { "." });
                         return Ok(());
                     }
 
-                    println!("Matched {} Tidal playlist(s):", matches.len());
+                    println!("Matched {} Tidal orphan playlist(s):", matches.len());
                     for (id, name) in &matches {
                         println!("- {} ({})", name, id);
                     }

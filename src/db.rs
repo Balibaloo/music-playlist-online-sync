@@ -346,6 +346,25 @@ pub fn set_remote_display_name(
     Ok(())
 }
 
+/// Return all remote_ids tracked in playlist_map for the given provider.
+pub fn get_all_remote_ids_for_provider(
+    conn: &Connection,
+    provider: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let prefix = format!("{}::", provider.to_lowercase());
+    let mut stmt = conn.prepare(
+        "SELECT remote_id FROM playlist_map WHERE playlist_name LIKE ?1 AND remote_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![format!("{}%", prefix)], |r| {
+        r.get::<_, String>(0)
+    })?;
+    let mut ids = std::collections::HashSet::new();
+    for row in rows {
+        ids.insert(row?);
+    }
+    Ok(ids)
+}
+
 /// Delete a playlist_map entry by playlist_name, scoped by provider
 pub fn delete_playlist_map(conn: &Connection, provider: &str, playlist_name: &str) -> Result<()> {
     let key = playlist_map_key(provider, playlist_name);

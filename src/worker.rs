@@ -826,6 +826,28 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
             continue;
         }
         // Process providers sequentially (safety). Could be parallelized with locks.
+        // Collapse events and compute original IDs once (invariant across providers).
+        let collapsed = collapse_events(evs);
+        let original_ids: Vec<i64> = evs.iter().map(|ev| ev.id).collect();
+
+        let mut rename_opt: Option<(String, String)> = None;
+        let mut has_delete: bool = false;
+        let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
+        for op in &collapsed {
+            match &op.action {
+                EventAction::Rename { from, to } => {
+                    rename_opt = Some((from.clone(), to.clone()))
+                }
+                EventAction::Delete => has_delete = true,
+                EventAction::Add => track_ops.push((EventAction::Add, op.track_path.clone())),
+                EventAction::Remove => {
+                    track_ops.push((EventAction::Remove, op.track_path.clone()))
+                }
+                _ => {}
+            }
+        }
+
+        let mut all_providers_ok = true;
         for (provider_name, provider) in &providers {
             let pl_tag = log_playlist_tag(playlist_name, provider_name);
             log::info!(
@@ -855,31 +877,8 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     pl_tag,
                     log_phase_tag("LOCK")
                 );
+                all_providers_ok = false;
                 continue;
-            }
-
-            // Collapse events
-            let collapsed = collapse_events(evs);
-
-            let mut rename_opt: Option<(String, String)> = None;
-            let mut has_delete: bool = false;
-            let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
-            let mut original_ids: Vec<i64> = Vec::new();
-            for op in &collapsed {
-                match &op.action {
-                    EventAction::Rename { from, to } => {
-                        rename_opt = Some((from.clone(), to.clone()))
-                    }
-                    EventAction::Delete => has_delete = true,
-                    EventAction::Add => track_ops.push((EventAction::Add, op.track_path.clone())),
-                    EventAction::Remove => {
-                        track_ops.push((EventAction::Remove, op.track_path.clone()))
-                    }
-                    _ => {}
-                }
-            }
-            for e in evs {
-                original_ids.push(e.id);
             }
 
             let adds = track_ops
@@ -1097,6 +1096,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                         );
                         // release lock and continue
                         release_lock_async(&db_pool, playlist_name, &worker_id).await;
+                        all_providers_ok = false;
                         continue;
                     }
                 }
@@ -1153,6 +1153,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
 
                                     // Release lock and skip further processing for this playlist.
                                     release_lock_async(&db_pool, playlist_name, &worker_id).await;
+                                    all_providers_ok = false;
                                     continue;
                                 }
                             }
@@ -1538,7 +1539,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                 track_ops.len()
             );
 
-            for (act, track_path_opt) in track_ops.into_iter() {
+            for (act, track_path_opt) in track_ops.clone().into_iter() {
                 if let Some(mut tp) = track_path_opt {
                     // provider-originated URIs may come in directly; we want to
                     // re-resolve everything against the *local* files so that each
@@ -1860,6 +1861,7 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     log_phase_tag("BATCH_REM"),
                     e
                 );
+                all_providers_ok = false;
             }
             if let Err(e) = apply_in_batches(
                 provider_arc.clone(),
@@ -1881,29 +1883,37 @@ pub async fn run_worker_once(cfg: &Config) -> Result<()> {
                     log_phase_tag("BATCH_ADD"),
                     e
                 );
+                all_providers_ok = false;
             }
-
-            // Mark original events as synced (blocking)
-            let ids_clone = original_ids.clone();
-            let pool = db_pool.clone();
-            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                let mut conn = pool.get()?;
-                if !ids_clone.is_empty() {
-                    db::mark_events_synced(&mut conn, &ids_clone)?;
-                }
-                Ok(())
-            })
-            .await??;
 
             // release lock
             release_lock_async(&db_pool, playlist_name, &worker_id).await;
 
             log::info!(
-                "{} {} {} playlist_processed events_synced={}",
+                "{} {} {} provider_done",
                 log_run_tag(&worker_id),
                 pl_tag,
                 log_phase_tag("FINALIZE"),
-                original_ids.len()
+            );
+        }
+
+        // Mark events as synced only when ALL providers succeeded.  If any
+        // provider failed we leave the events unsynced so the next worker
+        // cycle will retry them.
+        if all_providers_ok {
+            mark_events_synced_async(db_pool.clone(), original_ids.clone()).await?;
+            log::info!(
+                "{} events_synced count={} playlist={:?}",
+                log_run_tag(&worker_id),
+                original_ids.len(),
+                playlist_name
+            );
+        } else {
+            log::warn!(
+                "{} events_NOT_synced count={} playlist={:?} (some providers failed, will retry)",
+                log_run_tag(&worker_id),
+                original_ids.len(),
+                playlist_name
             );
         }
     }

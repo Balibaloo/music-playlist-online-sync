@@ -739,7 +739,52 @@ impl Provider for TidalProvider {
         let id = uri.rsplit(':').next().unwrap_or("").trim();
         id.parse::<u64>().ok().filter(|&n| n > 0).is_some()
     }
+    async fn playlist_is_valid(&self, playlist_id: &str) -> Result<bool> {
+        // Check whether the playlist UUID still appears in the user's
+        // TIDAL library.  If it doesn't, the cached mapping is stale.
+        match self.list_user_playlists().await {
+            Ok(playlists) => {
+                let found = playlists.iter().any(|(id, _name)| id == playlist_id);
+                if !found {
+                    log::debug!(
+                        "TIDAL playlist {} not found in user library; treating mapping as invalid",
+                        playlist_id
+                    );
+                }
+                Ok(found)
+            }
+            Err(e) => {
+                // If we can't list playlists (e.g. network error), propagate
+                // so the caller can retry rather than silently assuming valid.
+                Err(anyhow!("playlist_is_valid: failed to list user playlists: {}", e))
+            }
+        }
+    }
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
+        // Before creating a new playlist, check whether the user already owns
+        // one with this exact name.  This prevents duplicates when the cached
+        // UUID becomes stale but the playlist still exists under a different id.
+        match self.list_user_playlists().await {
+            Ok(playlists) => {
+                if let Some((existing_id, _)) = playlists.iter().find(|(_id, n)| n == name) {
+                    log::info!(
+                        "TidalProvider ensure_playlist: found existing playlist '{}' with id {}",
+                        name,
+                        existing_id
+                    );
+                    return Ok(existing_id.clone());
+                }
+            }
+            Err(e) => {
+                // Non-fatal: if listing fails we fall through to create.
+                log::warn!(
+                    "TidalProvider ensure_playlist: could not list playlists to check for '{}': {}",
+                    name,
+                    e
+                );
+            }
+        }
+
         let base = Self::base_url();
         // JSON:API-style endpoint: POST /playlists
         let url = format!("{}/playlists?countryCode={}", base, Self::country_code());

@@ -15,9 +15,10 @@ use crate::config::Config;
 pub struct RequestSpec {
     pub(crate) method: reqwest::Method,
     pub(crate) url: String,
-    /// Optional JSON body. When present reqwest sets `Content-Type: application/json`
-    /// before any explicit headers below, so a subsequent [`RequestSpec::header`] call
-    /// can override that content type (e.g. for Tidal's `application/vnd.tidal.v1+json`).
+    /// Optional JSON body. When present and no `content-type` override is given,
+    /// reqwest sets `Content-Type: application/json` automatically.  When a
+    /// `content-type` header IS supplied via [`RequestSpec::header`], the body
+    /// is serialized manually so only one Content-Type header is sent.
     pub(crate) json: Option<serde_json::Value>,
     /// Extra headers applied *after* the JSON body so they can override Content-Type.
     pub(crate) headers: Vec<(String, String)>,
@@ -115,9 +116,20 @@ pub trait Provider: Send + Sync {
                 )),
             };
             builder = builder.header(AUTHORIZATION, &bearer);
-            // Apply JSON body first; extra headers follow so they can override Content-Type.
+            // If a content-type override is present in spec.headers, serialize the
+            // JSON body manually and set the body+content-type explicitly so that
+            // we don't end up with two Content-Type headers (reqwest's .json() always
+            // appends application/json; calling .header() afterwards only adds a second
+            // value rather than replacing it, which confuses some API servers).
+            let has_ct_override = spec.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
             if let Some(body) = &spec.json {
-                builder = builder.json(body);
+                if has_ct_override {
+                    let bytes = serde_json::to_vec(body)
+                        .map_err(|e| anyhow::anyhow!("execute_request: JSON serialization failed: {}", e))?;
+                    builder = builder.body(bytes);
+                } else {
+                    builder = builder.json(body);
+                }
             }
             for (k, v) in &spec.headers {
                 builder = builder.header(k.as_str(), v.as_str());

@@ -1112,10 +1112,9 @@ impl Provider for TidalProvider {
         let base = Self::base_url();
         // JSON:API relationship endpoint: POST /playlists/{id}/relationships/items
         let url = format!(
-            "{}/playlists/{}/relationships/items?countryCode={}",
+            "{}/playlists/{}/relationships/items",
             base,
             playlist_id,
-            Self::country_code()
         );
         // Convert URIs like "tidal:track:{id}" into JSON:API relationship objects
         // { "data": [{"type": "tracks", "id": "{id}"}, ...] }.
@@ -1157,7 +1156,7 @@ impl Provider for TidalProvider {
         let body = json!({ "data": data });
         let spec = RequestSpec::post(&url)
             .json(body)
-            .header("content-type", "application/vnd.tidal.v1+json");
+            .header("content-type", "application/vnd.api+json");
         let resp = self.execute_request("add_tracks", &spec).await?;
         let status = resp.status();
         if !status.is_success() {
@@ -1171,7 +1170,6 @@ impl Provider for TidalProvider {
 
     async fn remove_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
         let base = Self::base_url();
-        let cc = Self::country_code();
 
         // Normalize requested URIs into raw track ids and build a set
         // for efficient lookup when scanning playlist items.  Skip anything that
@@ -1196,8 +1194,8 @@ impl Provider for TidalProvider {
 
         // JSON:API relationship endpoint for deleting items.
         let url = format!(
-            "{}/playlists/{}/relationships/items?countryCode={}",
-            base, playlist_id, cc
+            "{}/playlists/{}/relationships/items",
+            base, playlist_id
         );
 
         // Attempt the DELETE using (potentially cached) item ids.  If a chunk
@@ -1249,7 +1247,7 @@ impl Provider for TidalProvider {
                 let body = json!({ "data": chunk });
                 let mut spec = RequestSpec::delete(&url)
                     .json(body)
-                    .header("content-type", "application/vnd.tidal.v1+json");
+                    .header("content-type", "application/vnd.api+json");
                 if let Some(ref e) = items_etag {
                     spec = spec.header("if-match", e.as_str());
                 }

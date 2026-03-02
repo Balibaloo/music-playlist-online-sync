@@ -428,14 +428,17 @@ impl TidalProvider {
     /// `meta.itemId` for each relationship identifier. The itemId is
     /// exposed on the playlist items collection, so we first list items
     /// for the playlist and then build a mapping from track id -> itemIds.
+    ///
+    /// Also returns the ETag from the first page response so callers can
+    /// forward it as `If-Match` on the subsequent DELETE request.
     async fn resolve_playlist_item_ids(
         &self,
         playlist_id: &str,
         track_ids: &HashSet<String>,
-    ) -> Result<HashMap<String, Vec<String>>> {
+    ) -> Result<(HashMap<String, Vec<String>>, Option<String>)> {
         let mut result: HashMap<String, Vec<String>> = HashMap::new();
         if track_ids.is_empty() {
-            return Ok(result);
+            return Ok((result, None));
         }
 
         let base = Self::base_url();
@@ -444,11 +447,22 @@ impl TidalProvider {
             "{}/playlists/{}/relationships/items?countryCode={}",
             base, playlist_id, cc
         );
+        let mut etag: Option<String> = None;
 
         loop {
             let resp = self
                 .execute_request("resolve_playlist_item_ids", &RequestSpec::get(&next_url))
                 .await?;
+
+            // Capture ETag from the first page; Tidal requires it as
+            // If-Match on the subsequent DELETE request.
+            if etag.is_none() {
+                etag = resp
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+            }
 
             let status = resp.status();
             if !status.is_success() {
@@ -531,7 +545,7 @@ impl TidalProvider {
             }
         }
 
-        Ok(result)
+        Ok((result, etag))
     }
 
     /// List all track ids for a given TIDAL playlist.
@@ -1040,7 +1054,9 @@ impl Provider for TidalProvider {
         }
 
         // Resolve playlist itemIds for the tracks we want to remove.
-        let item_map = self
+        // resolve_playlist_item_ids also returns the ETag from the GET so we
+        // can forward it as If-Match on the DELETE (Tidal requires this).
+        let (item_map, items_etag) = self
             .resolve_playlist_item_ids(playlist_id, &track_ids)
             .await?;
 
@@ -1084,9 +1100,12 @@ impl Provider for TidalProvider {
         const TIDAL_DELETE_MAX: usize = 20;
         for chunk in data.chunks(TIDAL_DELETE_MAX) {
             let body = json!({ "data": chunk });
-            let spec = RequestSpec::delete(&url)
+            let mut spec = RequestSpec::delete(&url)
                 .json(body)
                 .header("content-type", "application/vnd.tidal.v1+json");
+            if let Some(ref e) = items_etag {
+                spec = spec.header("if-match", e.as_str());
+            }
             let resp = self.execute_request("remove_tracks", &spec).await?;
             let status = resp.status();
             if !status.is_success() {

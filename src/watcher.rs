@@ -4,7 +4,7 @@ use crate::models::EventAction;
 use crate::playlist;
 use crate::util;
 use anyhow::Context;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use notify::event::RemoveKind;
 use notify::{
     Config as NotifyConfig, Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode,
@@ -636,7 +636,18 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                         if treat_as_folder_rename {
                             synths.push(SyntheticEvent::FolderRename { from, to });
                         } else {
-                            synths.push(SyntheticEvent::FileRename { from, to });
+                            // Only treat the rename as a track event if at least one of the
+                            // paths matches the configured file extension filter.
+                            if path_matches_extensions(&from, &cfg_cb.file_extensions)
+                                || path_matches_extensions(&to, &cfg_cb.file_extensions)
+                            {
+                                synths.push(SyntheticEvent::FileRename { from, to });
+                            } else {
+                                trace!(
+                                    "NotifyEvent: skipping file rename {:?} -> {:?} (extension not in filter)",
+                                    from, to
+                                );
+                            }
                         }
                     } else {
                         for path in ev.paths.iter() {
@@ -705,7 +716,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                             ev.kind, ev.paths, ev.attrs, synths.len()
                         );
                     } else {
-                        debug!(
+                        trace!(
                             "NotifyEvent received (no matching files): kind={:?}, paths={:?}",
                             ev.kind, ev.paths
                         );
@@ -716,7 +727,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                             for s in synths.into_iter() {
                                 let ops = t.apply_synthetic_event(s.clone());
                                 if !ops.is_empty() {
-                                    info!("InMemoryTree produced {} logical op(s) for synthetic event {:?}", ops.len(), s);
+                                    debug!("InMemoryTree produced {} logical op(s) for synthetic event {:?}", ops.len(), s);
                                 }
                                 for op in ops {
                                     match op {
@@ -916,7 +927,13 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                             });
                                         }
                                         LogicalOp::Create { playlist_folder } => {
-                                            info!(
+                                            if let Some(ref wlvec) = t.whitelist {
+                                                let path_str = playlist_folder.to_string_lossy();
+                                                if !wlvec.iter().any(|re| re.is_match(&path_str)) {
+                                                    continue;
+                                                }
+                                            }
+                                            debug!(
                                                 "LogicalOp::Create playlist_folder={:?}",
                                                 playlist_folder
                                             );

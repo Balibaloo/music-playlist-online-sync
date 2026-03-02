@@ -39,6 +39,10 @@ pub struct TidalProvider {
     /// Cached result of `list_user_playlists()` so we only fetch the full
     /// library once per worker run instead of once per playlist.
     playlist_cache: tokio::sync::Mutex<Option<Vec<(String, String)>>>,
+    /// Cached mapping of playlist_id → (full track_id → item_ids map, ETag)
+    /// populated on the first `remove_tracks` call for each playlist within
+    /// a worker run to avoid re-fetching all playlist items on every call.
+    item_id_cache: tokio::sync::Mutex<HashMap<String, (HashMap<String, Vec<String>>, Option<String>)>>,
 }
 
 impl TidalProvider {
@@ -200,6 +204,32 @@ impl TidalProvider {
         }
     }
 
+    /// Invalidate the cached item-id map for a playlist (both in-memory and DB)
+    /// so that the next call to `resolve_playlist_item_ids` re-fetches from the API.
+    async fn invalidate_item_id_cache(&self, playlist_id: &str) {
+        // Clear in-memory entry.
+        {
+            let mut cache = self.item_id_cache.lock().await;
+            cache.remove(playlist_id);
+        }
+        // Clear DB entry (non-fatal).
+        let db_path = self.db_path.clone();
+        let pid = playlist_id.to_string();
+        if let Err(e) = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            crate::db::delete_playlist_item_id_cache(&conn, "tidal", &pid)
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("{}", e)))
+        {
+            log::warn!(
+                "tidal invalidate_item_id_cache: DB clear failed for {}: {}",
+                playlist_id,
+                e
+            );
+        }
+    }
+
     fn country_code() -> String {
         std::env::var("TIDAL_COUNTRY_CODE").unwrap_or_else(|_| "US".into())
     }
@@ -242,6 +272,7 @@ impl TidalProvider {
             root_folder_name,
             root_folder_id: tokio::sync::Mutex::new(None),
             playlist_cache: tokio::sync::Mutex::new(None),
+            item_id_cache: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
     fn is_authenticated(&self) -> bool {
@@ -436,10 +467,77 @@ impl TidalProvider {
         playlist_id: &str,
         track_ids: &HashSet<String>,
     ) -> Result<(HashMap<String, Vec<String>>, Option<String>)> {
-        let mut result: HashMap<String, Vec<String>> = HashMap::new();
         if track_ids.is_empty() {
-            return Ok((result, None));
+            return Ok((HashMap::new(), None));
         }
+
+        // Fast path: serve from cache if available for this playlist.
+        {
+            let cache = self.item_id_cache.lock().await;
+            if let Some((full_map, etag)) = cache.get(playlist_id) {
+                log::debug!(
+                    "tidal resolve_playlist_item_ids: cache HIT for playlist {} \
+                     (cached_items={} requested={})",
+                    playlist_id,
+                    full_map.len(),
+                    track_ids.len()
+                );
+                let result = full_map
+                    .iter()
+                    .filter(|(k, _)| track_ids.contains(*k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                return Ok((result, etag.clone()));
+            }
+        }
+        // Fast path 2: DB cache.
+        {
+            let db_path = self.db_path.clone();
+            let pid = playlist_id.to_string();
+            match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::get_playlist_item_id_cache(&conn, "tidal", &pid)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("{}", e)))
+            {
+                Ok(Some((full_map, etag))) => {
+                    log::debug!(
+                        "tidal resolve_playlist_item_ids: DB cache HIT for playlist {} \
+                         (cached_items={} requested={})",
+                        playlist_id,
+                        full_map.len(),
+                        track_ids.len()
+                    );
+                    // Warm the in-memory cache too.
+                    {
+                        let mut cache = self.item_id_cache.lock().await;
+                        cache.insert(playlist_id.to_string(), (full_map.clone(), etag.clone()));
+                    }
+                    let result = full_map
+                        .iter()
+                        .filter(|(k, _)| track_ids.contains(*k))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    return Ok((result, etag));
+                }
+                Ok(None) => {
+                    log::debug!(
+                        "tidal resolve_playlist_item_ids: DB cache MISS for playlist {}, fetching from API",
+                        playlist_id
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "tidal resolve_playlist_item_ids: DB cache lookup failed for {}: {}",
+                        playlist_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        let mut full_map: HashMap<String, Vec<String>> = HashMap::new();
 
         let base = Self::base_url();
         let cc = Self::country_code();
@@ -520,9 +618,9 @@ impl TidalProvider {
                         });
 
                     if let (Some(track_id), Some(item_id)) = (track_id_opt, item_id_opt) {
-                        if track_ids.contains(&track_id) {
-                            result.entry(track_id).or_default().push(item_id);
-                        }
+                        // Store all items (not just requested ones) so the
+                        // full map can be cached and reused by later calls.
+                        full_map.entry(track_id).or_default().push(item_id);
                     }
                 }
             }
@@ -545,6 +643,47 @@ impl TidalProvider {
             }
         }
 
+        // Persist to in-memory cache, then return only the requested slice.
+        let result = full_map
+            .iter()
+            .filter(|(k, _)| track_ids.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        {
+            let mut cache = self.item_id_cache.lock().await;
+            log::debug!(
+                "tidal resolve_playlist_item_ids: storing {} items in cache for playlist {}",
+                full_map.len(),
+                playlist_id
+            );
+            cache.insert(playlist_id.to_string(), (full_map.clone(), etag.clone()));
+        }
+        // Persist to DB (non-fatal).
+        {
+            let db_path = self.db_path.clone();
+            let pid = playlist_id.to_string();
+            let map_clone = full_map.clone();
+            let etag_clone = etag.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::upsert_playlist_item_id_cache(
+                    &conn,
+                    "tidal",
+                    &pid,
+                    &map_clone,
+                    etag_clone.as_deref(),
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("{}", e)))
+            {
+                log::warn!(
+                    "tidal resolve_playlist_item_ids: DB cache store failed for {}: {}",
+                    playlist_id,
+                    e
+                );
+            }
+        }
         Ok((result, etag))
     }
 
@@ -1025,6 +1164,8 @@ impl Provider for TidalProvider {
             let txt = resp.text().await.unwrap_or_default();
             return Err(anyhow!("tidal add tracks failed: {} => {}", status, txt));
         }
+        // New tracks were added; positions are now stale.
+        self.invalidate_item_id_cache(playlist_id).await;
         Ok(())
     }
 
@@ -1053,67 +1194,96 @@ impl Provider for TidalProvider {
             return Ok(());
         }
 
-        // Resolve playlist itemIds for the tracks we want to remove.
-        // resolve_playlist_item_ids also returns the ETag from the GET so we
-        // can forward it as If-Match on the DELETE (Tidal requires this).
-        let (item_map, items_etag) = self
-            .resolve_playlist_item_ids(playlist_id, &track_ids)
-            .await?;
-
-        // Build the DELETE payload using both track id and meta.itemId,
-        // matching TIDAL's expectation of `meta.itemId` being non-null.
-        let mut data: Vec<serde_json::Value> = Vec::new();
-        for u in uris {
-            let id = u.rsplit(':').next().unwrap_or("").trim();
-            if id.is_empty() {
-                continue;
-            }
-            if let Some(item_ids) = item_map.get(id) {
-                for item_id in item_ids {
-                    data.push(json!({
-                        "type": "tracks",
-                        "id": id,
-                        "meta": { "itemId": item_id }
-                    }));
-                }
-            }
-        }
-
-        // If we failed to resolve any playlist items for the requested
-        // URIs, treat this as a no-op to avoid repeatedly triggering
-        // INVALID_REQUEST_BODY errors.
-        if data.is_empty() {
-            return Ok(());
-        }
-
         // JSON:API relationship endpoint for deleting items.
         let url = format!(
             "{}/playlists/{}/relationships/items?countryCode={}",
             base, playlist_id, cc
         );
 
-        // The TIDAL API enforces a strict maximum of 20 items per DELETE
-        // request.  Because one input URI can fan out into multiple `data`
-        // entries (e.g. duplicate tracks have separate itemIds), the final
-        // payload may exceed 20 even when the caller only passed ≤20 URIs.
-        // Chunk the data array to stay within the limit.
-        const TIDAL_DELETE_MAX: usize = 20;
-        for chunk in data.chunks(TIDAL_DELETE_MAX) {
-            let body = json!({ "data": chunk });
-            let mut spec = RequestSpec::delete(&url)
-                .json(body)
-                .header("content-type", "application/vnd.tidal.v1+json");
-            if let Some(ref e) = items_etag {
-                spec = spec.header("if-match", e.as_str());
+        // Attempt the DELETE using (potentially cached) item ids.  If a chunk
+        // fails and we haven't yet retried with a fresh fetch, invalidate the
+        // cache and loop back once to re-resolve and retry all chunks.
+        let mut retried_fresh = false;
+        loop {
+            // Resolve playlist itemIds for the tracks we want to remove.
+            // resolve_playlist_item_ids also returns the ETag from the GET so
+            // we can forward it as If-Match on the DELETE (Tidal requires this).
+            let (item_map, items_etag) = self
+                .resolve_playlist_item_ids(playlist_id, &track_ids)
+                .await?;
+
+            // Build the DELETE payload using both track id and meta.itemId,
+            // matching TIDAL's expectation of `meta.itemId` being non-null.
+            let mut data: Vec<serde_json::Value> = Vec::new();
+            for u in uris {
+                let id = u.rsplit(':').next().unwrap_or("").trim();
+                if id.is_empty() {
+                    continue;
+                }
+                if let Some(item_ids) = item_map.get(id) {
+                    for item_id in item_ids {
+                        data.push(json!({
+                            "type": "tracks",
+                            "id": id,
+                            "meta": { "itemId": item_id }
+                        }));
+                    }
+                }
             }
-            let resp = self.execute_request("remove_tracks", &spec).await?;
-            let status = resp.status();
-            if !status.is_success() {
-                let txt = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("tidal remove tracks failed: {} => {}", status, txt));
+
+            // If we failed to resolve any playlist items for the requested
+            // URIs, treat this as a no-op to avoid repeatedly triggering
+            // INVALID_REQUEST_BODY errors.
+            if data.is_empty() {
+                return Ok(());
+            }
+
+            // The TIDAL API enforces a strict maximum of 20 items per DELETE
+            // request.  Because one input URI can fan out into multiple `data`
+            // entries (e.g. duplicate tracks have separate itemIds), the final
+            // payload may exceed 20 even when the caller only passed ≤20 URIs.
+            // Chunk the data array to stay within the limit.
+            const TIDAL_DELETE_MAX: usize = 20;
+            let mut chunk_err: Option<anyhow::Error> = None;
+            'chunks: for chunk in data.chunks(TIDAL_DELETE_MAX) {
+                let body = json!({ "data": chunk });
+                let mut spec = RequestSpec::delete(&url)
+                    .json(body)
+                    .header("content-type", "application/vnd.tidal.v1+json");
+                if let Some(ref e) = items_etag {
+                    spec = spec.header("if-match", e.as_str());
+                }
+                let resp = self.execute_request("remove_tracks", &spec).await?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let txt = resp.text().await.unwrap_or_default();
+                    chunk_err = Some(anyhow!("tidal remove tracks failed: {} => {}", status, txt));
+                    break 'chunks;
+                }
+            }
+
+            match chunk_err {
+                None => {
+                    // Deleted tracks are gone; invalidate so the next run
+                    // re-fetches correct positions.
+                    self.invalidate_item_id_cache(playlist_id).await;
+                    return Ok(());
+                }
+                Some(err) => {
+                    if !retried_fresh {
+                        log::warn!(
+                            "tidal remove_tracks: DELETE failed with cached item ids for \
+                             playlist {}, retrying with fresh fetch; error={}",
+                            playlist_id, err
+                        );
+                        self.invalidate_item_id_cache(playlist_id).await;
+                        retried_fresh = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
             }
         }
-        Ok(())
     }
 
     async fn search_track_uri(&self, title: &str, artist: &str) -> Result<Option<String>> {

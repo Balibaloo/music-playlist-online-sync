@@ -117,6 +117,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
          );",
     );
 
+    // Cached playlist item-id maps (track_id -> itemId slots) keyed by
+    // provider + remote playlist UUID.  Persisted across runs because this
+    // tool is the sole writer to these playlists, so itemIds are stable
+    // until we ourselves mutate the playlist.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_playlist_item_id_cache ( \
+           provider_name TEXT NOT NULL, \
+           remote_id TEXT NOT NULL, \
+           item_ids_json TEXT NOT NULL, \
+           etag TEXT, \
+           cached_at INTEGER NOT NULL, \
+           PRIMARY KEY (provider_name, remote_id) \
+         );",
+    );
+
     // Historically playlist_map stored bare playlist_name keys for Spotify.
     // We now uniformly prefix every key with "<provider>::".  Migrate any
     // remaining bare keys by prefixing them with "spotify::".
@@ -641,5 +656,69 @@ pub fn release_playlist_lock(
         params![playlist_name, worker_id],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Get the cached playlist item-id map for a given provider and remote playlist UUID.
+/// Returns the full track_id → item_ids mapping and the ETag, if present.
+pub fn get_playlist_item_id_cache(
+    conn: &Connection,
+    provider: &str,
+    remote_id: &str,
+) -> Result<Option<(std::collections::HashMap<String, Vec<String>>, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT item_ids_json, etag FROM remote_playlist_item_id_cache \
+         WHERE provider_name = ?1 AND remote_id = ?2 LIMIT 1",
+    )?;
+    let row = stmt
+        .query_row(params![provider, remote_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .optional()?;
+    if let Some((json_str, etag)) = row {
+        let map = serde_json::from_str(&json_str)
+            .with_context(|| format!("deserializing item_ids_json for remote_id={}", remote_id))?;
+        Ok(Some((map, etag)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Upsert the cached playlist item-id map for a given provider and remote playlist UUID.
+pub fn upsert_playlist_item_id_cache(
+    conn: &Connection,
+    provider: &str,
+    remote_id: &str,
+    item_ids: &std::collections::HashMap<String, Vec<String>>,
+    etag: Option<&str>,
+) -> Result<()> {
+    let json_str = serde_json::to_string(item_ids)
+        .with_context(|| format!("serializing item_ids for remote_id={}", remote_id))?;
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO remote_playlist_item_id_cache \
+         (provider_name, remote_id, item_ids_json, etag, cached_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(provider_name, remote_id) DO UPDATE SET \
+         item_ids_json = excluded.item_ids_json, \
+         etag = excluded.etag, \
+         cached_at = excluded.cached_at",
+        params![provider, remote_id, json_str, etag, now],
+    )?;
+    Ok(())
+}
+
+/// Delete the cached playlist item-id map for a given provider and remote playlist UUID.
+/// Called after any successful mutation so the next run re-fetches fresh positions.
+pub fn delete_playlist_item_id_cache(
+    conn: &Connection,
+    provider: &str,
+    remote_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM remote_playlist_item_id_cache \
+         WHERE provider_name = ?1 AND remote_id = ?2",
+        params![provider, remote_id],
+    )?;
     Ok(())
 }

@@ -504,6 +504,7 @@ async fn apply_in_batches(
     let batch_size = provider.max_batch_size(cfg);
     for chunk in uris.chunks(batch_size) {
         let mut attempt = 0u32;
+        let mut recreated = false;
         loop {
             attempt += 1;
             let res = if is_add {
@@ -603,7 +604,8 @@ async fn apply_in_batches(
                         // Special handling: if the provider reports that the
                         // playlist id no longer exists, recreate it and retry
                         // this batch once with the new id.
-                        if s.contains("tidal add tracks failed: 404 Not Found")
+                        if !recreated
+                            && s.contains("tidal add tracks failed: 404 Not Found")
                             && s.contains("Playlists with id")
                         {
                             let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
@@ -663,7 +665,10 @@ async fn apply_in_batches(
                                     );
 
                                     // Reset attempts and retry the current chunk with
-                                    // the fresh playlist id.
+                                    // the fresh playlist id. Guard with `recreated` so
+                                    // that if ensure_playlist returns the same (still
+                                    // broken) id we don't loop forever.
+                                    recreated = true;
                                     attempt = 0;
                                     continue;
                                 }
@@ -836,7 +841,16 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
     // For each playlist, process all providers
     // This ensures that for a given playlist, all configured
     // providers are updated before moving on to the next one.
-    for (playlist_name, evs) in &groups {
+    let total_playlists = groups.len();
+    for (playlist_idx, (playlist_name, evs)) in groups.iter().enumerate() {
+        log::info!(
+            "{} {} queue_progress playlist={}/{} name=\"{}\"",
+            log_run_tag(&worker_id),
+            log_phase_tag("QUEUE"),
+            playlist_idx + 1,
+            total_playlists,
+            playlist_name,
+        );
         let playlist_folder = cfg.root_folder.join(playlist_name);
         if !matches_whitelist(&playlist_folder, &remote_whitelist) {
             let ids_to_mark: Vec<i64> = evs.iter().map(|ev| ev.id).collect();

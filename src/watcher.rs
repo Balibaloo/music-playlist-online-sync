@@ -483,8 +483,9 @@ pub fn run_watcher_initial_pass(cfg: &Config) -> anyhow::Result<()> {
 pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     // Perform initial scan and playlist writes, then keep the watcher running.
     let tree = build_initial_tree_and_playlists(cfg)?;
-    // Shared debounce queue: map playlist folder -> earliest_due Instant
-    let debounce_map: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Shared debounce queue: map playlist folder -> (earliest_due Instant, accumulated file-event count).
+    // Count is incremented only for direct (leaf) file events; ancestor-only insertions use count=0.
+    let debounce_map: Arc<Mutex<HashMap<PathBuf, (Instant, usize)>>> = Arc::new(Mutex::new(HashMap::new()));
     let _debounce_ms = cfg.debounce_ms;
 
     // Wrap in-memory tree in Arc<Mutex<...>> so notify callback can update it concurrently
@@ -500,15 +501,18 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         let _tree = tree.clone();
         let remote_whitelist = remote_whitelist.clone();
         thread::spawn(move || {
+            // Deadline for deferred worker spawn after an over-threshold batch.
+            // None means no pending deferred trigger.
+            let mut deferred_trigger: Option<Instant> = None;
             loop {
                 // collect due playlists
-                let due: Vec<PathBuf> = {
+                let due: Vec<(PathBuf, usize)> = {
                     let mut guard = debounce_map.lock().unwrap();
                     let now = Instant::now();
                     let mut ready = Vec::new();
-                    guard.retain(|folder, &mut t| {
+                    guard.retain(|folder, &mut (t, count)| {
                         if t <= now {
-                            ready.push(folder.clone());
+                            ready.push((folder.clone(), count));
                             false // remove from map
                         } else {
                             true
@@ -517,7 +521,10 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                     ready
                 };
 
-                for folder in due {
+                // Sum leaf file-event counts across all due folders.
+                // Each file Add or Remove contributes 1; a file move (Remove+Add) contributes 2.
+                let total_events: usize = due.iter().map(|(_, c)| *c).sum();
+                for (folder, _) in due {
                     // Write local playlist and enqueue a generic create/update event for playlist (watcher enqueues per-file ops too)
                     let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
                     let rel = folder
@@ -592,6 +599,50 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                 );
                             }
                         });
+                    }
+                }
+
+                // Decide how to handle the batch based on its size.
+                // A file move counts as 2 events (Remove + Add), so the effective move
+                // threshold is half of watcher_instant_trigger_threshold.
+                let instant_threshold = cfg.watcher_instant_trigger_threshold;
+                if total_events > 0 && instant_threshold > 0 && total_events <= instant_threshold {
+                    // Small batch: spawn the worker immediately.
+                    info!(
+                        "Watcher: {} file event(s) in batch (threshold {}) \u{2014} spawning worker --trust-cache",
+                        total_events, instant_threshold
+                    );
+                    let _ = std::process::Command::new("music-file-playlist-online-sync")
+                        .args(["worker", "--trust-cache"])
+                        .spawn();
+                } else if total_events > 0 {
+                    // Over-threshold (or instant trigger disabled): arm/reset the deferred timer.
+                    let delay_sec = cfg.watcher_deferred_trigger_delay_sec;
+                    if delay_sec > 0 {
+                        let new_deadline = Instant::now() + Duration::from_secs(delay_sec);
+                        deferred_trigger = Some(new_deadline);
+                        info!(
+                            "Watcher: {} file event(s) exceeds instant threshold {} \u{2014} \
+                             deferred worker run in {}s (deadline reset)",
+                            total_events, instant_threshold, delay_sec
+                        );
+                    }
+                }
+
+                // Fire the deferred trigger once the deadline has passed AND all
+                // in-flight debounce windows have also expired (map is empty).
+                // This prevents the worker from running mid-burst.
+                if let Some(deadline) = deferred_trigger {
+                    let map_empty = debounce_map
+                        .lock()
+                        .map(|g| g.is_empty())
+                        .unwrap_or(false);
+                    if Instant::now() >= deadline && map_empty {
+                        info!("Watcher: deferred trigger firing \u{2014} spawning worker --trust-cache");
+                        let _ = std::process::Command::new("music-file-playlist-online-sync")
+                            .args(["worker", "--trust-cache"])
+                            .spawn();
+                        deferred_trigger = None;
                     }
                 }
 
@@ -771,16 +822,21 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 }
                                             }
 
-                                            // Debounce playlist rewrite for all affected folders
+                                            // Debounce playlist rewrite for all affected folders.
+                                            // index 0 is the leaf (direct parent of the file); rest are ancestors.
                                             if let Ok(mut dm) = debounce_map_cb.lock() {
-                                                for folder in &target_folders {
-                                                    dm.insert(
-                                                        folder.clone(),
-                                                        Instant::now()
-                                                            + Duration::from_millis(
-                                                                cfg_cb.debounce_ms,
-                                                            ),
-                                                    );
+                                                for (i, folder) in target_folders.iter().enumerate() {
+                                                    let new_t = Instant::now()
+                                                        + Duration::from_millis(cfg_cb.debounce_ms);
+                                                    if i == 0 {
+                                                        dm.entry(folder.clone())
+                                                            .and_modify(|(t, c)| { *t = new_t; *c += 1; })
+                                                            .or_insert((new_t, 1));
+                                                    } else {
+                                                        dm.entry(folder.clone())
+                                                            .and_modify(|(t, _c)| { *t = new_t; })
+                                                            .or_insert((new_t, 0));
+                                                    }
                                                 }
                                             }
 
@@ -869,14 +925,18 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                             }
 
                                             if let Ok(mut dm) = debounce_map_cb.lock() {
-                                                for folder in &target_folders {
-                                                    dm.insert(
-                                                        folder.clone(),
-                                                        Instant::now()
-                                                            + Duration::from_millis(
-                                                                cfg_cb.debounce_ms,
-                                                            ),
-                                                    );
+                                                for (i, folder) in target_folders.iter().enumerate() {
+                                                    let new_t = Instant::now()
+                                                        + Duration::from_millis(cfg_cb.debounce_ms);
+                                                    if i == 0 {
+                                                        dm.entry(folder.clone())
+                                                            .and_modify(|(t, c)| { *t = new_t; *c += 1; })
+                                                            .or_insert((new_t, 1));
+                                                    } else {
+                                                        dm.entry(folder.clone())
+                                                            .and_modify(|(t, _c)| { *t = new_t; })
+                                                            .or_insert((new_t, 0));
+                                                    }
                                                 }
                                             }
 
@@ -938,24 +998,24 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 playlist_folder
                                             );
                                             if let Ok(mut dm) = debounce_map_cb.lock() {
-                                                dm.insert(
-                                                    playlist_folder.clone(),
-                                                    Instant::now()
-                                                        + Duration::from_millis(cfg_cb.debounce_ms),
-                                                );
+                                                let new_t = Instant::now()
+                                                    + Duration::from_millis(cfg_cb.debounce_ms);
+                                                dm.entry(playlist_folder.clone())
+                                                    .and_modify(|(t, c)| { *t = new_t; *c += 1; })
+                                                    .or_insert((new_t, 1));
                                                 if let Some(mut p) = playlist_folder
                                                     .parent()
                                                     .map(|x| x.to_path_buf())
                                                 {
                                                     while p.starts_with(&cfg_cb.root_folder) {
                                                         if t.nodes.contains_key(&p) {
-                                                            dm.insert(
-                                                                p.clone(),
-                                                                Instant::now()
-                                                                    + Duration::from_millis(
-                                                                        cfg_cb.debounce_ms,
-                                                                    ),
-                                                            );
+                                                            let new_t = Instant::now()
+                                                                + Duration::from_millis(
+                                                                    cfg_cb.debounce_ms,
+                                                                );
+                                                            dm.entry(p.clone())
+                                                                .and_modify(|(t, _c)| { *t = new_t; })
+                                                                .or_insert((new_t, 0));
                                                         }
                                                         if p == cfg_cb.root_folder {
                                                             break;
@@ -991,13 +1051,13 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 {
                                                     while p.starts_with(&cfg_cb.root_folder) {
                                                         if t.nodes.contains_key(&p) {
-                                                            dm.insert(
-                                                                p.clone(),
-                                                                Instant::now()
-                                                                    + Duration::from_millis(
-                                                                        cfg_cb.debounce_ms,
-                                                                    ),
-                                                            );
+                                                            let new_t = Instant::now()
+                                                                + Duration::from_millis(
+                                                                    cfg_cb.debounce_ms,
+                                                                );
+                                                            dm.entry(p.clone())
+                                                                .and_modify(|(t, _c)| { *t = new_t; })
+                                                                .or_insert((new_t, 0));
                                                         }
                                                         if p == cfg_cb.root_folder {
                                                             break;
@@ -1146,28 +1206,26 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                             }
                                             // debounce both source and destination folders and ancestors
                                             if let Ok(mut dm) = debounce_map_cb.lock() {
-                                                dm.insert(
-                                                    from_folder.clone(),
-                                                    Instant::now()
-                                                        + Duration::from_millis(cfg_cb.debounce_ms),
-                                                );
-                                                dm.insert(
-                                                    to_folder.clone(),
-                                                    Instant::now()
-                                                        + Duration::from_millis(cfg_cb.debounce_ms),
-                                                );
+                                                let new_t = Instant::now()
+                                                    + Duration::from_millis(cfg_cb.debounce_ms);
+                                                dm.entry(from_folder.clone())
+                                                    .and_modify(|(t, c)| { *t = new_t; *c += 1; })
+                                                    .or_insert((new_t, 1));
+                                                dm.entry(to_folder.clone())
+                                                    .and_modify(|(t, c)| { *t = new_t; *c += 1; })
+                                                    .or_insert((new_t, 1));
                                                 if let Some(mut p) =
                                                     from_folder.parent().map(|x| x.to_path_buf())
                                                 {
                                                     while p.starts_with(&cfg_cb.root_folder) {
                                                         if t.nodes.contains_key(&p) {
-                                                            dm.insert(
-                                                                p.clone(),
-                                                                Instant::now()
-                                                                    + Duration::from_millis(
-                                                                        cfg_cb.debounce_ms,
-                                                                    ),
-                                                            );
+                                                            let new_t = Instant::now()
+                                                                + Duration::from_millis(
+                                                                    cfg_cb.debounce_ms,
+                                                                );
+                                                            dm.entry(p.clone())
+                                                                .and_modify(|(t, _c)| { *t = new_t; })
+                                                                .or_insert((new_t, 0));
                                                         }
                                                         if p == cfg_cb.root_folder {
                                                             break;
@@ -1186,13 +1244,13 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                 {
                                                     while p.starts_with(&cfg_cb.root_folder) {
                                                         if t.nodes.contains_key(&p) {
-                                                            dm.insert(
-                                                                p.clone(),
-                                                                Instant::now()
-                                                                    + Duration::from_millis(
-                                                                        cfg_cb.debounce_ms,
-                                                                    ),
-                                                            );
+                                                            let new_t = Instant::now()
+                                                                + Duration::from_millis(
+                                                                    cfg_cb.debounce_ms,
+                                                                );
+                                                            dm.entry(p.clone())
+                                                                .and_modify(|(t, _c)| { *t = new_t; })
+                                                                .or_insert((new_t, 0));
                                                         }
                                                         if p == cfg_cb.root_folder {
                                                             break;

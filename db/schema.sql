@@ -68,6 +68,16 @@ CREATE TABLE IF NOT EXISTS remote_playlist_contents_cache (
   PRIMARY KEY (provider_name, playlist_name)
 );
 
+-- Provider playlist list cache: persists the full (id, name) list returned by
+-- list_user_playlists() across process restarts so every new run can skip the
+-- O(n) per-playlist API roundtrips caused by TIDAL's pagination model.
+-- TTL is enforced in application code; stale entries are evicted at read time.
+CREATE TABLE IF NOT EXISTS provider_playlist_list_cache (
+  provider_name TEXT PRIMARY KEY,
+  entries_json TEXT NOT NULL,
+  cached_at INTEGER NOT NULL
+);
+
 -- processing locks (per-playlist worker lease)
 CREATE TABLE IF NOT EXISTS processing_locks (
   playlist_name TEXT PRIMARY KEY,

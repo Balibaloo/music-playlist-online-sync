@@ -49,7 +49,7 @@ echo "sudo install -m 0755 /opt/$PKGNAME/music-file-playlist-online-sync /usr/lo
 echo "# copy systemd units"
 echo "sudo cp /opt/$PKGNAME/systemd/* /etc/systemd/system/"
 echo "sudo systemctl daemon-reload"
-echo "sudo systemctl enable music-file-playlist-online-sync-worker.service"
-echo "sudo systemctl start music-file-playlist-online-sync-worker.service"
+echo "sudo systemctl enable --now music-file-playlist-online-sync-watcher.service"
+echo "sudo systemctl enable --now music-file-playlist-online-sync-reconcile.timer"
 
 exit 0

@@ -132,6 +132,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
          );",
     );
 
+    // Provider playlist list cache: persists the full (id, name) list so that
+    // subsequent process starts (including post-reconcile worker runs) can
+    // skip the O(n) per-playlist API roundtrips inside list_user_playlists.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS provider_playlist_list_cache ( \
+           provider_name TEXT PRIMARY KEY, \
+           entries_json TEXT NOT NULL, \
+           cached_at INTEGER NOT NULL \
+         );",
+    );
+
     // Historically playlist_map stored bare playlist_name keys for Spotify.
     // We now uniformly prefix every key with "<provider>::".  Migrate any
     // remaining bare keys by prefixing them with "spotify::".
@@ -719,6 +730,65 @@ pub fn delete_playlist_item_id_cache(
         "DELETE FROM remote_playlist_item_id_cache \
          WHERE provider_name = ?1 AND remote_id = ?2",
         params![provider, remote_id],
+    )?;
+    Ok(())
+}
+
+/// TTL for the provider playlist list cache: 24 hours.  Because the
+/// application write-throughs every in-memory mutation (add/rename/remove)
+/// back to the DB, the cache stays current within a run; the TTL only guards
+/// against externally-made changes (manual edits in the Tidal/Spotify client).
+const PROVIDER_PLAYLIST_LIST_CACHE_TTL_SECS: i64 = 24 * 3600;
+
+/// Load the persisted provider playlist list cache.
+/// Returns `None` if there is no entry or the entry has expired (TTL).
+pub fn get_provider_playlist_list_cache(
+    conn: &Connection,
+    provider: &str,
+) -> Result<Option<Vec<(String, String)>>> {
+    let now = Utc::now().timestamp();
+    let row = conn
+        .query_row(
+            "SELECT entries_json, cached_at FROM provider_playlist_list_cache \
+             WHERE provider_name = ?1",
+            params![provider],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    match row {
+        None => Ok(None),
+        Some((_json, cached_at)) if now - cached_at > PROVIDER_PLAYLIST_LIST_CACHE_TTL_SECS => {
+            // Expired – evict so the next upsert starts clean.
+            let _ = conn.execute(
+                "DELETE FROM provider_playlist_list_cache WHERE provider_name = ?1",
+                params![provider],
+            );
+            Ok(None)
+        }
+        Some((json, _)) => {
+            let entries: Vec<(String, String)> = serde_json::from_str(&json)
+                .with_context(|| format!("deserializing provider_playlist_list_cache for {}", provider))?;
+            Ok(Some(entries))
+        }
+    }
+}
+
+/// Write (or overwrite) the full provider playlist list cache entry.
+pub fn upsert_provider_playlist_list_cache(
+    conn: &Connection,
+    provider: &str,
+    entries: &[(String, String)],
+) -> Result<()> {
+    let json = serde_json::to_string(entries)
+        .with_context(|| format!("serializing provider_playlist_list_cache for {}", provider))?;
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO provider_playlist_list_cache (provider_name, entries_json, cached_at) \
+         VALUES (?1, ?2, ?3) \
+         ON CONFLICT(provider_name) DO UPDATE SET \
+           entries_json = excluded.entries_json, \
+           cached_at = excluded.cached_at",
+        params![provider, json, now],
     )?;
     Ok(())
 }

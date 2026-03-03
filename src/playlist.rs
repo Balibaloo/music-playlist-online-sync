@@ -43,6 +43,9 @@ pub fn write_flat_playlist(
     order_mode: &str,
     file_extensions: &[String],
 ) -> anyhow::Result<()> {
+    if !target_folder.is_dir() {
+        return Ok(());
+    }
     use std::io::Write;
 
     let mut files: Vec<PathBuf> = WalkDir::new(target_folder)
@@ -89,6 +92,9 @@ pub fn write_linked_playlist(
     linked_reference_format: &str,
     local_playlist_template: &str,
 ) -> anyhow::Result<()> {
+    if !target_folder.is_dir() {
+        return Ok(());
+    }
     // write references to immediate child playlists
     let mut file = std::fs::File::create(playlist_path)?;
     let mut children: Vec<std::path::PathBuf> = Vec::new();

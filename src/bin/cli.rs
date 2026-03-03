@@ -212,11 +212,14 @@ async fn main() -> Result<()> {
                 .with_context(|| "running worker".to_string())?;
         }
         Commands::Reconcile => {
-            // Nightly reconciliation is synchronous and does not require Tokio.
-            if let Err(e) = lib::worker::run_nightly_reconcile(&cfg) {
-                eprintln!("Reconcile failed: {}", e);
-                std::process::exit(1);
-            }
+            // Scan the folder tree, write local .m3u files, and enqueue Create
+            // events for every playlist.  Then immediately drain the queue with
+            // the worker so the remote is synced in the same run.
+            lib::worker::run_nightly_reconcile(&cfg)
+                .with_context(|| "reconcile scan failed".to_string())?;
+            lib::worker::run_worker_once(&cfg, false)
+                .await
+                .with_context(|| "worker run after reconcile failed".to_string())?;
         }
         Commands::ConfigValidate => {
             match lib::config::Config::from_path(&resolved_config_path.as_path()) {

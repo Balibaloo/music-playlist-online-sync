@@ -41,6 +41,24 @@ fi
 echo "installing binary to $TARGET_BIN"
 install -Dm755 "$BINARY" "$TARGET_BIN"
 
+# service user and runtime directories
+SERVICE_USER=music-file-playlist-online-sync
+if ! getent group "$SERVICE_USER" >/dev/null; then
+    groupadd --system "$SERVICE_USER"
+fi
+if ! getent passwd "$SERVICE_USER" >/dev/null; then
+    useradd --system --no-create-home \
+        --shell /usr/bin/nologin \
+        --gid "$SERVICE_USER" \
+        --home-dir /var/lib/music-sync \
+        "$SERVICE_USER"
+fi
+mkdir -p /var/lib/music-sync /var/log/music-sync /etc/music-sync
+touch /var/lib/music-sync/music-sync.db
+chown -R "$SERVICE_USER:$SERVICE_USER" /var/lib/music-sync /var/log/music-sync /etc/music-sync
+chmod 750 /var/lib/music-sync /var/log/music-sync /etc/music-sync
+chmod 640 /var/lib/music-sync/music-sync.db
+
 # config
 mkdir -p "$CONFIG_DIR"
 if [ ! -e "$CONFIG_FILE" ]; then
@@ -68,7 +86,18 @@ Installation complete.
 To enable & start the services run (as root or with sudo):
 
   systemctl enable --now music-file-playlist-online-sync-watcher.service
-  systemctl enable --now music-file-playlist-online-sync-worker.timer
   systemctl enable --now music-file-playlist-online-sync-reconcile.timer
+
+NOTE: watcher-driven worker triggering
+  The watcher now spawns the worker automatically for file changes:
+  - Small batches (≤ watcher_instant_trigger_threshold, default 20 events):
+    worker runs immediately after the debounce window.
+  - Large batches (> threshold): worker is deferred by
+    watcher_deferred_trigger_delay_sec (default 300 s) after activity settles.
+
+NOTE: reconcile now runs the worker
+  The Reconcile command (and reconcile.timer) runs the worker immediately
+  after enqueueing events — the full scan-then-sync cycle completes in one
+  shot without waiting for a separate timer.
 
 EOF

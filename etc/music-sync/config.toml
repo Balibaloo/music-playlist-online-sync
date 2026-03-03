@@ -20,9 +20,6 @@ token_refresh_interval = 3600
 #online_root_playlist = "Syncd"
 online_playlist_structure = "flat"
 
-
-# Worker / timing
-worker_interval_sec = 300
 #nightly_reconcile_cron = "0 3 * * *" # cron expression
 
 # Queue / DB

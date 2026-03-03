@@ -125,6 +125,24 @@ impl SpotifyProvider {
                 return Ok(cached.clone());
             }
         }
+        // DB cache: try the persisted list to avoid re-fetching on every process restart.
+        {
+            let db_path = self.db_path.clone();
+            let cached = tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::get_provider_playlist_list_cache(&conn, "spotify")
+            })
+            .await??;
+            if let Some(entries) = cached {
+                debug!(
+                    "list_user_playlists: loaded {} playlists from DB cache",
+                    entries.len()
+                );
+                let mut cache = self.playlist_cache.lock().await;
+                *cache = Some(entries.clone());
+                return Ok(entries);
+            }
+        }
 
         let user_id = self.get_user_id().await?;
         let mut playlists = Vec::new();
@@ -158,34 +176,83 @@ impl SpotifyProvider {
             let mut cache = self.playlist_cache.lock().await;
             *cache = Some(playlists.clone());
         }
+        // Persist to DB so subsequent process starts skip re-fetching the library.
+        {
+            let db_path = self.db_path.clone();
+            let to_save = playlists.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &to_save)
+            })
+            .await;
+        }
         Ok(playlists)
     }
 
     /// Update the cached name for an existing playlist after a rename,
     /// avoiding a full re-fetch of the user's library.
     async fn cache_update_name(&self, playlist_id: &str, new_name: &str) {
-        let mut cache = self.playlist_cache.lock().await;
-        if let Some(ref mut entries) = *cache {
-            if let Some(entry) = entries.iter_mut().find(|(id, _)| id == playlist_id) {
-                entry.1 = new_name.to_string();
+        let updated = {
+            let mut cache = self.playlist_cache.lock().await;
+            if let Some(ref mut entries) = *cache {
+                if let Some(entry) = entries.iter_mut().find(|(id, _)| id == playlist_id) {
+                    entry.1 = new_name.to_string();
+                }
+                Some(entries.clone())
+            } else {
+                None
             }
+        };
+        if let Some(entries) = updated {
+            let db_path = self.db_path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)
+            })
+            .await;
         }
     }
 
     /// Add a newly-created playlist to the cache so that subsequent calls
     /// to `list_user_playlists` see it without a round-trip.
     async fn cache_add_entry(&self, playlist_id: &str, name: &str) {
-        let mut cache = self.playlist_cache.lock().await;
-        if let Some(ref mut entries) = *cache {
-            entries.push((playlist_id.to_string(), name.to_string()));
+        let updated = {
+            let mut cache = self.playlist_cache.lock().await;
+            if let Some(ref mut entries) = *cache {
+                entries.push((playlist_id.to_string(), name.to_string()));
+                Some(entries.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(entries) = updated {
+            let db_path = self.db_path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)
+            })
+            .await;
         }
     }
 
     /// Remove a deleted playlist from the cache.
     async fn cache_remove_entry(&self, playlist_id: &str) {
-        let mut cache = self.playlist_cache.lock().await;
-        if let Some(ref mut entries) = *cache {
-            entries.retain(|(id, _)| id != playlist_id);
+        let updated = {
+            let mut cache = self.playlist_cache.lock().await;
+            if let Some(ref mut entries) = *cache {
+                entries.retain(|(id, _)| id != playlist_id);
+                Some(entries.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(entries) = updated {
+            let db_path = self.db_path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)
+            })
+            .await;
         }
     }
     pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf, config: crate::config::Config) -> Self {

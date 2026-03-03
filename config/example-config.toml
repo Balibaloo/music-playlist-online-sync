@@ -16,11 +16,31 @@ playlist_mode = "flat" # "flat" or "linked"
 linked_reference_format = "relative"
 file_extensions = ["*.mp3", "*.flac", "*.ogg", "*.wav", "*.mp4", "*.m4a"]
 debounce_ms = 250
+
+# Watcher-driven worker triggering
+#
+# When the watcher detects file changes it can spawn the worker itself instead
+# of waiting for the next systemd timer tick.
+#
+# watcher_instant_trigger_threshold (default: 20)
+#   Batches with this many leaf file-events or fewer trigger the worker
+#   immediately after the debounce window expires.  A file move counts as 2
+#   events (Remove + Add), so the effective move threshold is half this value.
+#   Set to 0 to disable instant triggering entirely.
+#
+# watcher_deferred_trigger_delay_sec (default: 300)
+#   Batches that exceed the instant threshold (or when instant triggering is
+#   disabled) arm a deferred timer instead.  The timer is reset to this many
+#   seconds whenever another over-threshold batch arrives, so rapid bursts
+#   coalesce into a single worker run.  The worker fires only once the debounce
+#   map has fully drained (all file activity has settled).
+#   Set to 0 to disable deferred triggering (large batches are handled only by
+#   the scheduled systemd timer).
+watcher_instant_trigger_threshold = 20
+watcher_deferred_trigger_delay_sec = 300
 log_dir = "/var/log/music-sync"
 token_refresh_interval = 3600
 
-# Worker / timing
-worker_interval_sec = 300
 nightly_reconcile_cron = "0 3 * * *" # cron expression; weekly timer set to Thursday at 03:00 by systemd example
 
 # Queue / DB

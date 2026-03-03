@@ -50,14 +50,29 @@ pub struct Config {
     pub linked_reference_format: String,
     #[serde(default = "default_debounce")]
     pub debounce_ms: u64,
+
+    /// Number of leaf file-events in a debounce batch at or below which the
+    /// watcher immediately spawns the worker in the background (--trust-cache).
+    /// A file move counts as 2 events (Remove + Add), so the effective move
+    /// threshold is half this value.  Set to 0 to disable instant triggering.
+    #[serde(default = "default_instant_trigger_threshold")]
+    pub watcher_instant_trigger_threshold: usize,
+
+    /// Seconds after the last over-threshold debounce batch before the watcher
+    /// spawns the worker for large bulk changes.  The deadline is reset whenever
+    /// another over-threshold flush occurs, so rapid bursts coalesce into a
+    /// single deferred run.  The worker fires only once the debounce map drains
+    /// (all file activity has settled).  Set to 0 to disable deferred triggering
+    /// (large batches are then handled only by the scheduled systemd timer).
+    #[serde(default = "default_deferred_trigger_delay")]
+    pub watcher_deferred_trigger_delay_sec: u64,
+
     #[serde(default = "default_log_dir")]
     pub log_dir: PathBuf,
     #[serde(default = "default_token_refresh_interval")]
     pub token_refresh_interval: u64,
 
     // Worker/timing
-    #[serde(default = "default_worker_interval")]
-    pub worker_interval_sec: u64,
     #[serde(default = "default_nightly_cron")]
     pub nightly_reconcile_cron: String,
 
@@ -132,14 +147,17 @@ fn default_linked_reference_format() -> String {
 fn default_debounce() -> u64 {
     250
 }
+fn default_instant_trigger_threshold() -> usize {
+    20
+}
+fn default_deferred_trigger_delay() -> u64 {
+    300
+}
 fn default_log_dir() -> PathBuf {
     "/var/log/music-sync".into()
 }
 fn default_token_refresh_interval() -> u64 {
     3600
-}
-fn default_worker_interval() -> u64 {
-    300
 }
 fn default_nightly_cron() -> String {
     "0 3 * * *".into()

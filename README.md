@@ -77,6 +77,22 @@ config option `max_batch_size_tidal` (default 20) is automatically
 capped so the worker never submits a larger payload; this avoids the
 "size must be between 1 and 20" errors seen in earlier logs.
 
+Watcher-driven worker triggering
+
+The watcher process can spawn the worker itself after a debounced file-change event, without waiting for the next systemd timer tick.  Two config options control this:
+
+| Option | Default | Description |
+|---|---|---|
+| `watcher_instant_trigger_threshold` | `20` | Batches with **this many or fewer** leaf file-events spawn the worker immediately after the debounce window. A file move = 2 events. Set to `0` to disable. |
+| `watcher_deferred_trigger_delay_sec` | `300` | Batches **above** the instant threshold arm a deferred timer. The deadline is reset on every new over-threshold flush, so rapid bulk imports coalesce. Worker fires once the debounce map drains. Set to `0` to disable (large batches handled only by the systemd timer). |
+
+In practice:
+- Moving 1–10 files → worker runs within `debounce_ms` + a few hundred ms.
+- Moving 11–20 files → still instant-triggered.
+- Importing 50+ files → deferred 5 minutes after the last file settles, or at the next systemd timer tick, whichever comes first.
+
+The `Reconcile` command (and `reconcile.timer`) also runs the worker immediately after enqueueing events, so the full scan → sync cycle completes in one systemd activation.
+
 Issue board skeleton
 
 

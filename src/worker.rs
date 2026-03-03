@@ -743,6 +743,30 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
     // Create a connection pool and run migrations once.
     let db_pool = db::create_pool(&cfg.db_path)?;
 
+    // Track currently-held playlist locks so the Ctrl-C handler can release them.
+    let active_locks: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // Spawn a Ctrl-C handler that releases all active locks before exiting.
+    {
+        let active_locks = active_locks.clone();
+        let pool = db_pool.clone();
+        let wid = worker_id.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                log::info!(
+                    "Ctrl-C received; releasing active playlist locks before exit..."
+                );
+                let locks = active_locks.lock().unwrap().clone();
+                for playlist_name in &locks {
+                    release_lock_async(&pool, playlist_name, &wid).await;
+                    log::info!("Released lock for playlist: {}", playlist_name);
+                }
+                std::process::exit(130);
+            }
+        });
+    }
+
     // Fetch unsynced events (blocking)
     let events: Vec<Event> = tokio::task::spawn_blocking({
         let pool = db_pool.clone();
@@ -942,6 +966,9 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                 continue;
             }
 
+            // Register this lock so the Ctrl-C handler can release it if needed.
+            active_locks.lock().unwrap().push(playlist_name.clone());
+
             let adds = track_ops
                 .iter()
                 .filter(|(a, _)| matches!(a, EventAction::Add))
@@ -1066,6 +1093,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                 .await??;
 
                 // release lock
+                active_locks.lock().unwrap().retain(|n| n != playlist_name);
                 release_lock_async(&db_pool, playlist_name, &worker_id).await;
 
                 log::info!(
@@ -1158,6 +1186,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                             e
                         );
                         // release lock and continue
+                        active_locks.lock().unwrap().retain(|n| n != playlist_name);
                         release_lock_async(&db_pool, playlist_name, &worker_id).await;
                         all_providers_ok = false;
                         continue;
@@ -1226,6 +1255,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                                     );
 
                                     // Release lock and skip further processing for this playlist.
+                                    active_locks.lock().unwrap().retain(|n| n != playlist_name);
                                     release_lock_async(&db_pool, playlist_name, &worker_id).await;
                                     all_providers_ok = false;
                                     continue;
@@ -2153,6 +2183,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
             }
 
             // release lock
+            active_locks.lock().unwrap().retain(|n| n != playlist_name);
             release_lock_async(&db_pool, playlist_name, &worker_id).await;
 
             log::info!(

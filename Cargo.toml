@@ -12,7 +12,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.7"
 clap = { version = "4.1", features = ["derive"] }
-tokio = { version = "1.30", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.30", features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }
 notify = "6.1"
 rusqlite = "0.28"
 dirs = "4.0"

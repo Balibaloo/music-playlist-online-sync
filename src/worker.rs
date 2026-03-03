@@ -2043,7 +2043,17 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
             }
 
 
+            // Snapshot add/remove sets before they are moved into apply_in_batches
+            // so that we can update remote_playlist_contents_cache after successful
+            // mutations.  Without this update a subsequent `worker --trust-cache` run
+            // would compare desired URIs against the pre-mutation cached remote state
+            // and re-schedule the same operations again.
+            let snapshot_add_uris = add_uris.clone();
+            let snapshot_remove_uris: std::collections::HashSet<String> =
+                remove_uris.iter().cloned().collect();
+
             let provider_arc = provider.clone();
+            let mut batches_ok = true;
             if let Err(e) = apply_in_batches(
                 provider_arc.clone(),
                 &mut remote_id,
@@ -2065,6 +2075,7 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                     e
                 );
                 all_providers_ok = false;
+                batches_ok = false;
             }
             if let Err(e) = apply_in_batches(
                 provider_arc.clone(),
@@ -2087,6 +2098,44 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                     e
                 );
                 all_providers_ok = false;
+                batches_ok = false;
+            }
+
+            // After successful mutations, update remote_playlist_contents_cache by
+            // applying the add/remove delta to the cached pre-mutation snapshot.
+            // This ensures a subsequent `--trust-cache` run sees the correct remote
+            // state and does not re-apply the same mutations.
+            if batches_ok
+                && (!snapshot_add_uris.is_empty() || !snapshot_remove_uris.is_empty())
+            {
+                let pool = db_pool.clone();
+                let prov = provider_name.clone();
+                let pl = playlist_name.clone();
+                let rid = remote_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = pool.get() {
+                        if let Ok(Some((cached_rid, uris_json))) =
+                            db::get_remote_playlist_contents_cache(&conn, &prov, &pl)
+                        {
+                            if cached_rid == rid {
+                                let mut current: Vec<String> =
+                                    serde_json::from_str(&uris_json).unwrap_or_default();
+                                current.retain(|u| !snapshot_remove_uris.contains(u));
+                                for u in &snapshot_add_uris {
+                                    if !current.contains(u) {
+                                        current.push(u.clone());
+                                    }
+                                }
+                                if let Ok(json) = serde_json::to_string(&current) {
+                                    let _ = db::upsert_remote_playlist_contents_cache(
+                                        &conn, &prov, &pl, &rid, &json,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
             }
 
             // release lock

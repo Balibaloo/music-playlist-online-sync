@@ -691,7 +691,6 @@ impl TidalProvider {
     async fn list_playlist_track_ids(&self, playlist_id: &str) -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
         let base = Self::base_url();
-        let bearer = self.get_bearer().await?;
         let cc = Self::country_code();
         let mut next_url = format!(
             "{}/playlists/{}/relationships/items?countryCode={}",
@@ -700,10 +699,7 @@ impl TidalProvider {
 
         loop {
             let resp = self
-                .client
-                .get(&next_url)
-                .header(AUTHORIZATION, &bearer)
-                .send()
+                .execute_request("list_playlist_track_ids", &RequestSpec::get(&next_url))
                 .await?;
 
             let status = resp.status();
@@ -754,7 +750,10 @@ impl TidalProvider {
                         });
 
                     if let Some(id) = track_id_opt {
-                        out.push(id);
+                        // Return URIs in the same "tidal:track:{id}" format used by
+                        // search_track_uri / the track_cache so that the reconcile
+                        // set-difference compares apples-to-apples.
+                        out.push(format!("tidal:track:{}", id));
                     }
                 }
             }

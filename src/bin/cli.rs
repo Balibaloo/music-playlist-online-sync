@@ -35,6 +35,20 @@ enum Commands {
     },
     /// Run a full reconciliation scan of the root folder
     Reconcile,
+    /// Reconcile a single playlist folder, optionally restricted to one provider
+    ReconcilePlaylist {
+        /// Absolute (or root-relative) path to the playlist folder to reconcile
+        #[arg(long, value_name = "PATH")]
+        path: PathBuf,
+
+        /// Provider to sync to (e.g. "spotify" or "tidal"); omit to sync all configured providers
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+
+        /// Trust the track/playlist cache even if local files have changed on disk.
+        #[arg(long)]
+        trust_cache: bool,
+    },
     /// Validate config file and exit
     ConfigValidate,
     /// Auth helpers
@@ -74,6 +88,11 @@ enum Commands {
         #[command(subcommand)]
         sub: TroubleshootCommands,
     },
+    /// Database inspection and maintenance helpers
+    Db {
+        #[command(subcommand)]
+        sub: DbCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -82,6 +101,34 @@ enum TroubleshootCommands {
     File {
         #[command(subcommand)]
         sub: TroubleshootFileCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCommands {
+    /// Inspect and manage the local playlist_map table
+    PlaylistMap {
+        #[command(subcommand)]
+        sub: DbPlaylistMapCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbPlaylistMapCommands {
+    /// List all playlist_map entries (optionally filtered by provider)
+    List {
+        /// Filter to a single provider (e.g. "spotify" or "tidal")
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+    },
+    /// Remove a stale playlist_map entry by provider + playlist key
+    Remove {
+        /// Provider the entry belongs to
+        #[arg(long, value_name = "PROVIDER")]
+        provider: String,
+        /// Logical playlist name (the key stored in the DB, e.g. "_rooty tooty 3")
+        #[arg(long, value_name = "PLAYLIST")]
+        playlist: String,
     },
 }
 
@@ -207,19 +254,28 @@ async fn main() -> Result<()> {
             lib::watcher::run_watcher(&cfg).with_context(|| "running watcher".to_string())?;
         }
         Commands::Worker { trust_cache } => {
-            lib::worker::run_worker_once(&cfg, trust_cache)
+            lib::worker::run_worker_once(&cfg, None, trust_cache)
                 .await
                 .with_context(|| "running worker".to_string())?;
         }
         Commands::Reconcile => {
-            // Scan the folder tree, write local .m3u files, and enqueue Create
-            // events for every playlist.  Then immediately drain the queue with
-            // the worker so the remote is synced in the same run.
+            // 1. Purge any DB-tracked playlists whose local folder is gone.
+            lib::worker::purge_deleted_playlists(&cfg)
+                .await
+                .with_context(|| "purge deleted playlists failed".to_string())?;
+            // 2. Scan the folder tree, write local .m3u files, and enqueue Create
+            //    events for every playlist.
             lib::worker::run_nightly_reconcile(&cfg)
                 .with_context(|| "reconcile scan failed".to_string())?;
-            lib::worker::run_worker_once(&cfg, false)
+            // 3. Drain the event queue so the remote is synced in the same run.
+            lib::worker::run_worker_once(&cfg, None, false)
                 .await
                 .with_context(|| "worker run after reconcile failed".to_string())?;
+        }
+        Commands::ReconcilePlaylist { path, provider, trust_cache } => {
+            lib::worker::reconcile_single_playlist(&cfg, &path, provider.as_deref(), trust_cache)
+                .await
+                .with_context(|| format!("reconcile-playlist {:?} provider={}", path, provider.as_deref().unwrap_or("<all>")))?;
         }
         Commands::ConfigValidate => {
             match lib::config::Config::from_path(&resolved_config_path.as_path()) {
@@ -716,6 +772,73 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Db { sub } => match sub {
+            DbCommands::PlaylistMap { sub } => match sub {
+                DbPlaylistMapCommands::List { provider } => {
+                    match rusqlite::Connection::open(&cfg.db_path) {
+                        Ok(conn) => {
+                            match music_file_playlist_online_sync::db::list_playlist_map_entries(
+                                &conn,
+                                provider.as_deref(),
+                            ) {
+                                Ok(entries) => {
+                                    if entries.is_empty() {
+                                        println!("No playlist_map entries found.");
+                                    } else {
+                                        println!("{:<10} {:<45} {:<40} {}",
+                                            "PROVIDER", "PLAYLIST KEY", "REMOTE ID", "DISPLAY NAME");
+                                        println!("{}", "-".repeat(130));
+                                        for (prov, pl, rid, dn, _synced) in &entries {
+                                            println!("{:<10} {:<45} {:<40} {}",
+                                                prov,
+                                                pl,
+                                                rid.as_deref().unwrap_or("(none)"),
+                                                dn.as_deref().unwrap_or(""),
+                                            );
+                                        }
+                                        println!("({} row(s))", entries.len());
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to list playlist_map: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to open DB: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                DbPlaylistMapCommands::Remove { provider, playlist } => {
+                    match rusqlite::Connection::open(&cfg.db_path) {
+                        Ok(conn) => {
+                            match music_file_playlist_online_sync::db::delete_playlist_map(
+                                &conn,
+                                &provider,
+                                &playlist,
+                            ) {
+                                Ok(()) => {
+                                    println!(
+                                        "Removed playlist_map entry: provider={} playlist={}",
+                                        provider, playlist
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to remove playlist_map entry: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to open DB: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            },
+        },
     }
 
     Ok(())

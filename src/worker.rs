@@ -68,7 +68,7 @@ pub async fn desired_remote_uris_for_playlist(
     provider: Arc<dyn Provider>,
     db_pool: &db::DbPool,
     trust_cache: bool,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, usize)> {
     use std::io::BufRead;
 
     // Map logical playlist key back to on-disk .m3u path using the same
@@ -98,7 +98,7 @@ pub async fn desired_remote_uris_for_playlist(
     let playlist_path = folder.join(playlist_file_name);
 
     if !playlist_path.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
 
     // compute metadata so we can consult the cache
@@ -128,13 +128,27 @@ pub async fn desired_remote_uris_for_playlist(
             }
             // parse the cached JSON and return
             let uris: Vec<String> = serde_json::from_str(&uris_json).unwrap_or_default();
-            return Ok(uris);
+            // Count how many non-comment, non-blank lines the m3u file currently
+            // has so the caller can tell "empty file" from "all lookups failed".
+            let local_track_count = std::fs::File::open(&playlist_path)
+                .ok()
+                .map(|f| {
+                    use std::io::BufRead;
+                    std::io::BufReader::new(f)
+                        .lines()
+                        .filter_map(|l| l.ok())
+                        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+                        .count()
+                })
+                .unwrap_or(0);
+            return Ok((uris, local_track_count));
         }
     }
 
     let file = std::fs::File::open(&playlist_path)?;
     let reader = std::io::BufReader::new(file);
     let mut uris: Vec<String> = Vec::new();
+    let mut local_track_count: usize = 0;
     let provider_name = provider.name().to_string();
 
     for line in reader.lines() {
@@ -146,6 +160,7 @@ pub async fn desired_remote_uris_for_playlist(
         if !local_path.exists() {
             continue;
         }
+        local_track_count += 1;
 
         let local_path_str = local_path.display().to_string();
 
@@ -343,7 +358,7 @@ pub async fn desired_remote_uris_for_playlist(
         .await??;
     }
 
-    Ok(uris)
+    Ok((uris, local_track_count))
 }
 
 
@@ -620,6 +635,13 @@ async fn apply_in_batches(
                                 playlist_id
                             );
 
+                            // Flush the stale playlist-list cache entry for this
+                            // id before calling ensure_playlist.  Without this,
+                            // ensure_playlist finds the deleted playlist by name in
+                            // the DB/in-memory cache and returns the same dead UUID,
+                            // causing the retry to 404 again indefinitely.
+                            provider.invalidate_playlist_list_cache(playlist_id).await;
+
                             // Recreate the playlist via ensure_playlist using the
                             // current display name, then update playlist_map.
                             match provider
@@ -737,7 +759,7 @@ async fn apply_in_batches(
     Ok(())
 }
 
-pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
+pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_cache: bool) -> Result<()> {
     let worker_id = Uuid::new_v4().to_string();
 
     // Create a connection pool and run migrations once.
@@ -851,6 +873,23 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
             log_run_tag(&worker_id)
         );
         return Ok(());
+    }
+
+    // Apply optional provider filter (e.g. when reconciling a single playlist)
+    if let Some(filter) = provider_filter {
+        let filter_lc = filter.to_ascii_lowercase();
+        providers.retain(|(name, _)| name.eq_ignore_ascii_case(&filter_lc));
+        if providers.is_empty() {
+            anyhow::bail!(
+                "provider '{}' is not configured or not authenticated",
+                filter
+            );
+        }
+        log::info!(
+            "{} provider_filter={} – processing only this provider",
+            log_run_tag(&worker_id),
+            filter
+        );
     }
 
     let remote_whitelist = compile_whitelist(Some(cfg.effective_remote_whitelist()));
@@ -1128,16 +1167,30 @@ pub async fn run_worker_once(cfg: &Config, trust_cache: bool) -> Result<()> {
                     log_phase_tag("RESOLVE")
                 );
                 match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone(), &db_pool, trust_cache).await {
-                    Ok(desired) => {
+                    Ok((desired, local_track_count)) => {
                         log::info!(
-                            "{} {} {} reconcile_desired_uris_computed count={}",
+                            "{} {} {} reconcile_desired_uris_computed count={} local_track_count={}",
                             log_run_tag(&worker_id),
                             pl_tag,
                             log_phase_tag("RESOLVE"),
-                            desired.len()
+                            desired.len(),
+                            local_track_count
                         );
-                        if !desired.is_empty() {
+                        if !desired.is_empty() || local_track_count == 0 {
+                            // Either we have URIs to sync, or the local playlist is
+                            // genuinely empty (local_track_count == 0) and the remote
+                            // should be cleared to match.
                             reconcile_desired = Some(desired);
+                        } else {
+                            // local_track_count > 0 but no URIs resolved — all lookups
+                            // failed.  Do not wipe the remote in this case.
+                            log::warn!(
+                                "{} {} {} reconcile_all_lookups_failed local_tracks={} – remote playlist left unchanged",
+                                log_run_tag(&worker_id),
+                                pl_tag,
+                                log_phase_tag("RESOLVE"),
+                                local_track_count
+                            );
                         }
                     }
                     Err(e) => {
@@ -2332,4 +2385,285 @@ pub fn run_nightly_reconcile(cfg: &Config) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Scan the local `playlist_map` DB table and delete any entries whose
+/// corresponding local folder no longer exists under `cfg.root_folder`.
+///
+/// For each stale entry:
+///  – The remote playlist is deleted via the provider (if the provider is
+///    authenticated and the entry has a `remote_id`).
+///  – The `playlist_map` row is removed from the local DB.
+///  – The matching `playlist_cache` row (if any) is also removed.
+///
+/// Only DB-tracked playlists are touched; playlists that exist solely on the
+/// provider and have no local mapping are intentionally left alone.
+pub async fn purge_deleted_playlists(cfg: &Config) -> Result<()> {
+    let db_pool = db::create_pool(&cfg.db_path)?;
+
+    // Load all tracked entries.
+    let entries: Vec<(String, String, Option<String>)> = tokio::task::spawn_blocking({
+        let pool = db_pool.clone();
+        move || -> Result<Vec<(String, String, Option<String>)>, anyhow::Error> {
+            let conn = pool.get()?;
+            let rows = db::list_playlist_map_entries(&conn, None)?;
+            Ok(rows.into_iter().map(|(p, pl, rid, _, _)| (p, pl, rid)).collect())
+        }
+    })
+    .await??;
+
+    if entries.is_empty() {
+        log::info!("purge_deleted_playlists: no tracked playlists in DB, nothing to purge");
+        return Ok(());
+    }
+
+    // Build the set of authenticated providers (same pattern as run_worker_once).
+    let mut providers: std::collections::HashMap<String, Arc<dyn Provider>> =
+        std::collections::HashMap::new();
+
+    let has_spotify = tokio::task::spawn_blocking({
+        let pool = db_pool.clone();
+        move || -> Result<bool, anyhow::Error> {
+            let conn = pool.get()?;
+            Ok(db::load_credential_with_client(&conn, "spotify")?.is_some())
+        }
+    })
+    .await??;
+    if has_spotify {
+        providers.insert(
+            "spotify".to_string(),
+            Arc::new(SpotifyProvider::new(
+                String::new(),
+                String::new(),
+                cfg.db_path.clone(),
+                cfg.clone(),
+            )),
+        );
+    }
+
+    let has_tidal = tokio::task::spawn_blocking({
+        let pool = db_pool.clone();
+        move || -> Result<bool, anyhow::Error> {
+            let conn = pool.get()?;
+            Ok(db::load_credential_with_client(&conn, "tidal")?.is_some())
+        }
+    })
+    .await??;
+    if has_tidal {
+        providers.insert(
+            "tidal".to_string(),
+            Arc::new(TidalProvider::new(
+                String::new(),
+                String::new(),
+                cfg.db_path.clone(),
+                if cfg.online_root_playlist.trim().is_empty() {
+                    None
+                } else {
+                    Some(cfg.online_root_playlist.clone())
+                },
+                cfg.clone(),
+            )),
+        );
+    }
+
+    let mut purged = 0usize;
+    let mut skipped = 0usize;
+
+    for (provider_name, playlist_name, remote_id) in &entries {
+        let local_folder = cfg.root_folder.join(playlist_name);
+        if local_folder.is_dir() {
+            continue; // still exists locally, nothing to do
+        }
+
+        log::info!(
+            "purge_deleted_playlists: folder {:?} gone – purging provider={} playlist={:?}",
+            local_folder,
+            provider_name,
+            playlist_name
+        );
+
+        // Delete the remote playlist if we have both a remote_id and a live provider.
+        if let Some(rid) = remote_id {
+            match providers.get(provider_name.as_str()) {
+                Some(provider) => {
+                    match provider.delete_playlist(rid).await {
+                        Ok(()) => {
+                            log::info!(
+                                "purge_deleted_playlists: deleted remote playlist provider={} id={}",
+                                provider_name, rid
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "purge_deleted_playlists: failed to delete remote playlist \
+                                 provider={} id={}: {} – DB entry will still be removed",
+                                provider_name, rid, e
+                            );
+                            // We still remove the DB entry so it doesn't block future reconciles.
+                        }
+                    }
+                }
+                None => {
+                    log::warn!(
+                        "purge_deleted_playlists: provider '{}' not authenticated – \
+                         cannot delete remote playlist id={}, removing DB entry only",
+                        provider_name, rid
+                    );
+                    skipped += 1;
+                }
+            }
+        }
+
+        // Remove the playlist_map and playlist_cache rows.
+        let pool = db_pool.clone();
+        let prov = provider_name.clone();
+        let pname = playlist_name.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+            let conn = pool.get()?;
+            db::delete_playlist_map(&conn, &prov, &pname)?;
+            // Best-effort removal of the playlist_cache entry.
+            let _ = conn.execute(
+                "DELETE FROM playlist_cache WHERE playlist_name = ?1",
+                rusqlite::params![pname],
+            );
+            Ok(())
+        })
+        .await??;
+
+        purged += 1;
+    }
+
+    log::info!(
+        "purge_deleted_playlists: done purged={} remote_skipped_no_provider={}",
+        purged,
+        skipped
+    );
+    Ok(())
+}
+
+/// Reconcile a single playlist folder for a specific provider.
+///
+/// `playlist_folder` must be an absolute path (or resolvable relative path) to a
+/// folder that lives under `cfg.root_folder`.  The function:
+///  1. Writes the local `.m3u` playlist for that folder (same logic as the nightly scan).
+///  2. Enqueues a `Create` event for the playlist key.
+///  3. Runs the event-processing worker restricted to `provider_name`.
+pub async fn reconcile_single_playlist(
+    cfg: &Config,
+    playlist_folder: &std::path::Path,
+    provider_name: Option<&str>,
+    trust_cache: bool,
+) -> Result<()> {
+    // Resolve the target folder to an absolute canonical path.
+    let folder = if playlist_folder.is_absolute() {
+        playlist_folder.to_path_buf()
+    } else {
+        cfg.root_folder.join(playlist_folder)
+    };
+    let folder = folder
+        .canonicalize()
+        .with_context(|| format!("cannot canonicalize path {:?}", folder))?;
+    // If the caller passed the .m3u file path instead of the parent folder,
+    // use the parent so the playlist key matches what the nightly reconcile
+    // and the worker expect (i.e. the relative folder path, not file path).
+    let folder = if folder.is_file() {
+        folder
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(folder)
+    } else {
+        folder
+    };
+
+    // Compute the relative path (playlist key) from root_folder.
+    let root = cfg
+        .root_folder
+        .canonicalize()
+        .with_context(|| format!("cannot canonicalize root_folder {:?}", cfg.root_folder))?;
+    let rel = folder
+        .strip_prefix(&root)
+        .with_context(|| {
+            format!(
+                "path {:?} is not under root_folder {:?}",
+                folder, root
+            )
+        })?
+        .to_path_buf();
+
+    let folder_name = folder
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let path_to_parent = rel
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::new());
+    let path_to_parent_str = if path_to_parent.as_os_str().is_empty() {
+        String::new()
+    } else {
+        let mut s = path_to_parent.display().to_string();
+        if !s.ends_with(std::path::MAIN_SEPARATOR) {
+            s.push(std::path::MAIN_SEPARATOR);
+        }
+        s
+    };
+
+    let playlist_file_name = crate::util::expand_template(
+        &cfg.local_playlist_template,
+        folder_name,
+        &path_to_parent_str,
+    );
+    let playlist_file_path = folder.join(&playlist_file_name);
+
+    log::info!(
+        "reconcile_single_playlist: writing {:?} for provider {}",
+        playlist_file_path,
+        provider_name.unwrap_or("<all>")
+    );
+
+    // Write the local m3u playlist.
+    if cfg.playlist_mode == "flat" {
+        crate::playlist::write_flat_playlist(
+            &folder,
+            &playlist_file_path,
+            &cfg.playlist_order_mode,
+            &cfg.file_extensions,
+        )
+        .with_context(|| format!("writing flat playlist {:?}", playlist_file_path))?;
+    } else {
+        crate::playlist::write_linked_playlist(
+            &folder,
+            &playlist_file_path,
+            &cfg.linked_reference_format,
+            &cfg.local_playlist_template,
+        )
+        .with_context(|| format!("writing linked playlist {:?}", playlist_file_path))?;
+    }
+
+    // Enqueue a Create event so the worker has something to process.
+    let pname = rel.display().to_string();
+    let db_pool = db::create_pool(&cfg.db_path)?;
+    {
+        let pool = db_pool.clone();
+        let pname = pname.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+            let conn = pool.get()?;
+            crate::db::enqueue_event(
+                &conn,
+                &pname,
+                &crate::models::EventAction::Create,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .await??;
+    }
+    log::info!(
+        "reconcile_single_playlist: enqueued Create event for playlist \"{}\"",
+        pname
+    );
+
+    // Process the queue restricted to the requested provider (or all providers).
+    run_worker_once(cfg, provider_name, trust_cache).await
 }

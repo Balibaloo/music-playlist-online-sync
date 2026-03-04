@@ -41,7 +41,7 @@ async fn test_worker_no_credentials() {
     let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
     db::run_migrations(&conn).unwrap();
     // Should not panic or process events
-    let result = run_worker_once(&cfg, false).await;
+    let result = run_worker_once(&cfg, None, false).await;
     assert!(result.is_ok());
 }
 
@@ -84,6 +84,6 @@ async fn test_worker_with_mock_and_real_providers() {
     let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
     db::run_migrations(&conn).unwrap();
     // Should not panic or process events
-    let result = run_worker_once(&cfg, false).await;
+    let result = run_worker_once(&cfg, None, false).await;
     assert!(result.is_ok());
 }

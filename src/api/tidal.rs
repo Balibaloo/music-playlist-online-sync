@@ -1449,6 +1449,55 @@ impl Provider for TidalProvider {
         Ok(None)
     }
 
+    async fn invalidate_playlist_list_cache(&self, playlist_id: &str) {
+        // Remove only the dead entry from the in-memory cache.  If the
+        // in-memory cache is cold (None), load it from the DB first so we
+        // can do a surgical remove without triggering a full live re-fetch.
+        let pid = playlist_id.to_string();
+        let db_path = self.db_path.clone();
+        let updated = {
+            let mut cache = self.playlist_cache.lock().await;
+            if cache.is_none() {
+                // Warm from DB so we can edit it in place.
+                let loaded = tokio::task::spawn_blocking(move || {
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    crate::db::get_provider_playlist_list_cache(&conn, "tidal")
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+                *cache = loaded;
+            }
+            if let Some(ref mut entries) = *cache {
+                entries.retain(|(id, _)| id != &pid);
+                Some(entries.clone())
+            } else {
+                None
+            }
+        };
+        // Write the pruned list back to DB, or if there was nothing in DB
+        // either, delete the row so the next live fetch starts clean.
+        let db_path = self.db_path.clone();
+        let pid2 = playlist_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            match updated {
+                Some(ref entries) => {
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", entries)?;
+                }
+                None => {
+                    // No cache at all – delete the row so a stale entry from a
+                    // previous process run can't survive.
+                    crate::db::delete_provider_playlist_list_cache(&conn, "tidal")?;
+                }
+            }
+            log::debug!("invalidate_playlist_list_cache: removed {} from tidal playlist cache", pid2);
+            Ok(())
+        })
+        .await;
+    }
+
     async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
         let base = Self::base_url();
         let url = format!(

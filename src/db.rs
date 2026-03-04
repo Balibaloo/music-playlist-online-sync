@@ -414,6 +414,42 @@ pub fn delete_playlist_map(conn: &Connection, provider: &str, playlist_name: &st
     Ok(())
 }
 
+/// List all playlist_map entries, optionally filtered to a single provider.
+/// Returns `(provider, playlist_name, remote_id, remote_display_name, last_synced_at)`.
+pub fn list_playlist_map_entries(
+    conn: &Connection,
+    provider_filter: Option<&str>,
+) -> Result<Vec<(String, String, Option<String>, Option<String>, Option<i64>)>> {
+    let like_prefix = match provider_filter {
+        Some(p) => format!("{}::%", p.to_lowercase()),
+        None => "%".to_string(),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT playlist_name, remote_id, remote_display_name, last_synced_at \
+         FROM playlist_map WHERE playlist_name LIKE ?1 ORDER BY playlist_name",
+    )?;
+    let rows = stmt.query_map(params![like_prefix], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (key, remote_id, display_name, synced_at) = row?;
+        // key format is "<provider>::<playlist_name>"
+        let (prov, pl) = if let Some(sep) = key.find("::") {
+            (key[..sep].to_string(), key[sep + 2..].to_string())
+        } else {
+            (String::new(), key.clone())
+        };
+        out.push((prov, pl, remote_id, display_name, synced_at));
+    }
+    Ok(out)
+}
+
 /// Migrate a playlist_map entry from one logical playlist name to another,
 /// scoped by provider. Keeps the same remote_id but updates the key so that
 /// future events keyed by the new logical name reuse the existing remote
@@ -789,6 +825,16 @@ pub fn upsert_provider_playlist_list_cache(
            entries_json = excluded.entries_json, \
            cached_at = excluded.cached_at",
         params![provider, json, now],
+    )?;
+    Ok(())
+}
+
+/// Delete the entire provider playlist list cache row, forcing a live
+/// re-fetch of the playlist library on the next call.
+pub fn delete_provider_playlist_list_cache(conn: &Connection, provider: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM provider_playlist_list_cache WHERE provider_name = ?1",
+        params![provider],
     )?;
     Ok(())
 }

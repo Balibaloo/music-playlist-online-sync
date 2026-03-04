@@ -47,7 +47,7 @@ fn run_worker_uses_mock_provider_and_marks_events_synced() {
 
     // run worker once
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async move { run_worker_once(&cfg, false).await.unwrap() });
+    rt.block_on(async move { run_worker_once(&cfg, None, false).await.unwrap() });
 
     // verify event is NOT marked synced (since no real provider is configured)
     let cnt: i64 = conn

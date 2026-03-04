@@ -183,7 +183,7 @@ async fn playlist_cache_and_rename_migration() {
     let provider = Arc::new(CountingProvider::new(counter.clone()));
 
     // first run should populate cache and increment counter
-    let uris1 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
+    let (uris1, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
         .await
         .unwrap();
     assert_eq!(uris1, vec!["uri".to_string()]);
@@ -191,7 +191,7 @@ async fn playlist_cache_and_rename_migration() {
     assert!(calls_after_first > 0);
 
     // second run without changing the file should hit cache and not increment
-    let uris2 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
+    let (uris2, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
         .await
         .unwrap();
     assert_eq!(uris2, uris1);
@@ -207,7 +207,7 @@ async fn playlist_cache_and_rename_migration() {
     music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "count", "foo", "bar").unwrap();
 
     // third run using new logical name should also hit cache (no new provider calls)
-    let uris3 = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone(), &pool, false)
+    let (uris3, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone(), &pool, false)
         .await
         .unwrap();
     assert_eq!(uris3, uris1);

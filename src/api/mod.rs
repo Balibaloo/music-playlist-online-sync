@@ -213,6 +213,14 @@ pub trait Provider: Send + Sync {
         Ok(Some(String::new()))
     }
 
+    /// Evict a known-dead playlist id from the provider's playlist list cache
+    /// (both in-memory and persisted) so that the next `ensure_playlist` call
+    /// performs a live fetch rather than returning the stale UUID.
+    ///
+    /// The default implementation is a no-op; providers with a playlist list
+    /// cache (e.g. Tidal) should override this.
+    async fn invalidate_playlist_list_cache(&self, _playlist_id: &str) {}
+
     /// Return the provider's name (for logging, UI, etc.)
     fn name(&self) -> &str;
 

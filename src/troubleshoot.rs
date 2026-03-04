@@ -89,7 +89,10 @@ pub fn file_info(cfg: &Config, path: &Path) -> Result<()> {
                 if let Ok(Some((mtime, size, hash, uris_json))) =
                     db::get_playlist_cache(&conn, &playlist_name, provider)
                 {
-                    println!("\nplaylist cache for '{}' (provider={}):", playlist_name, provider);
+                    println!(
+                        "\nplaylist cache for '{}' (provider={}):",
+                        playlist_name, provider
+                    );
                     println!("  file_mtime: {}", mtime);
                     println!("  file_size: {}", size);
                     println!("  file_hash: {}", hash);
@@ -97,9 +100,12 @@ pub fn file_info(cfg: &Config, path: &Path) -> Result<()> {
                 }
             }
             // If no entries found for any provider, say so.
-            let any_found = ["spotify", "tidal"]
-                .iter()
-                .any(|p| db::get_playlist_cache(&conn, &playlist_name, p).ok().flatten().is_some());
+            let any_found = ["spotify", "tidal"].iter().any(|p| {
+                db::get_playlist_cache(&conn, &playlist_name, p)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            });
             if !any_found {
                 println!("\nno playlist cache entry for '{}'", playlist_name);
             }
@@ -115,7 +121,8 @@ pub fn file_info(cfg: &Config, path: &Path) -> Result<()> {
 pub async fn file_lookup(cfg: &Config, provider_name: &str, path: &Path) -> Result<()> {
     println!(
         "=== lookup '{}' via provider '{}' ===",
-        path.display(), provider_name
+        path.display(),
+        provider_name
     );
 
     if !path.exists() {
@@ -124,30 +131,42 @@ pub async fn file_lookup(cfg: &Config, provider_name: &str, path: &Path) -> Resu
     }
 
     // build provider instance
-    let prov: std::sync::Arc<dyn crate::api::Provider> = match provider_name.to_ascii_lowercase().as_str() {
-        "spotify" => {
-            use crate::api::spotify::SpotifyProvider;
-            let db_path = cfg.db_path.clone();
-            std::sync::Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path, cfg.clone()))
-        }
-        "tidal" => {
-            use crate::api::tidal::TidalProvider;
-            let db_path = cfg.db_path.clone();
-            let root = if cfg.online_root_playlist.trim().is_empty() {
-                None
-            } else {
-                Some(cfg.online_root_playlist.clone())
-            };
-            std::sync::Arc::new(TidalProvider::new(String::new(), String::new(), db_path, root, cfg.clone()))
-        }
-        "mock" => {
-            use crate::api::mock::MockProvider;
-            std::sync::Arc::new(MockProvider::new())
-        }
-        other => {
-            return Err(anyhow::anyhow!("unknown provider '{}'", other));
-        }
-    };
+    let prov: std::sync::Arc<dyn crate::api::Provider> =
+        match provider_name.to_ascii_lowercase().as_str() {
+            "spotify" => {
+                use crate::api::spotify::SpotifyProvider;
+                let db_path = cfg.db_path.clone();
+                std::sync::Arc::new(SpotifyProvider::new(
+                    String::new(),
+                    String::new(),
+                    db_path,
+                    cfg.clone(),
+                ))
+            }
+            "tidal" => {
+                use crate::api::tidal::TidalProvider;
+                let db_path = cfg.db_path.clone();
+                let root = if cfg.online_root_playlist.trim().is_empty() {
+                    None
+                } else {
+                    Some(cfg.online_root_playlist.clone())
+                };
+                std::sync::Arc::new(TidalProvider::new(
+                    String::new(),
+                    String::new(),
+                    db_path,
+                    root,
+                    cfg.clone(),
+                ))
+            }
+            "mock" => {
+                use crate::api::mock::MockProvider;
+                std::sync::Arc::new(MockProvider::new())
+            }
+            other => {
+                return Err(anyhow::anyhow!("unknown provider '{}'", other));
+            }
+        };
 
     if !prov.is_authenticated() {
         println!("provider not authenticated (skipping lookup)");
@@ -233,7 +252,13 @@ pub async fn file_lookup(cfg: &Config, provider_name: &str, path: &Path) -> Resu
         let uri_c = uri_opt.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::upsert_track_cache(&conn, &provider_c, &path_c, isrc_c.as_deref(), uri_c.as_deref())?;
+            db::upsert_track_cache(
+                &conn,
+                &provider_c,
+                &path_c,
+                isrc_c.as_deref(),
+                uri_c.as_deref(),
+            )?;
             Ok(())
         })
         .await??;
@@ -344,4 +369,3 @@ mod tests {
         Ok(())
     }
 }
-

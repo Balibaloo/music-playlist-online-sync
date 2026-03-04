@@ -47,10 +47,7 @@ pub fn parse_retry_after(error_string: &str) -> Option<u64> {
         .and_then(|rest| {
             let token = rest.trim();
             if token.starts_with("Some(") {
-                token
-                    .trim_start_matches("Some(")
-                    .split(')')
-                    .next()
+                token.trim_start_matches("Some(").split(')').next()
             } else if token.starts_with("None") {
                 None
             } else {
@@ -108,10 +105,7 @@ where
                 );
                 return Err(e);
             }
-            RetryAction::Retry {
-                error,
-                retry_after,
-            } => {
+            RetryAction::Retry { error, retry_after } => {
                 if attempt >= cfg.max_attempts {
                     log::error!(
                         "[retry:{}] giving up after {} attempts: {}",
@@ -232,7 +226,10 @@ mod tests {
 
     #[test]
     fn parse_retry_after_some() {
-        assert_eq!(parse_retry_after("rate_limited retry_after=Some(5)"), Some(5));
+        assert_eq!(
+            parse_retry_after("rate_limited retry_after=Some(5)"),
+            Some(5)
+        );
     }
 
     #[test]

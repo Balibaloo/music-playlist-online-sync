@@ -38,7 +38,12 @@ fn spotify_search_returns_none_on_error() {
     .to_string();
     db::save_credential_raw(&conn, "spotify", &stored, None, None).unwrap();
 
-    let provider = SpotifyProvider::new("cid".into(), "csecret".into(), db_path.clone(), Default::default());
+    let provider = SpotifyProvider::new(
+        "cid".into(),
+        "csecret".into(),
+        db_path.clone(),
+        Default::default(),
+    );
     let rt = tokio::runtime::Runtime::new().unwrap();
     let res = rt.block_on(async move { provider.search_track_uri("Title", "Artist").await });
     assert!(res.is_ok());

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lib::api::Provider;
 use lib::config::Config;
-use music_file_playlist_online_sync as lib;
 use lib::troubleshoot;
+use music_file_playlist_online_sync as lib;
 use std::path::{Path, PathBuf};
 use tracing::subscriber as tracing_subscriber_global;
 use tracing_log::LogTracer;
@@ -208,7 +208,11 @@ async fn main() -> Result<()> {
     // avoid the internal panic that was observed earlier.
     let file_layer = if let Ok(()) = std::fs::create_dir_all(&cfg.log_dir) {
         let probe = cfg.log_dir.join("music-sync.log");
-        match std::fs::OpenOptions::new().create(true).append(true).open(&probe) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&probe)
+        {
             Ok(_) => {
                 // since we were able to touch the file, it's reasonably safe to
                 // ask the appender to manage it as well.
@@ -219,7 +223,8 @@ async fn main() -> Result<()> {
             Err(e) => {
                 eprintln!(
                     "warning: cannot open log file {}: {}; logging to stdout only",
-                    probe.display(), e
+                    probe.display(),
+                    e
                 );
                 let (nb, _guard) = tracing_appender::non_blocking(std::io::stdout());
                 fmt::layer().with_writer(nb)
@@ -228,7 +233,11 @@ async fn main() -> Result<()> {
     } else {
         eprintln!(
             "warning: could not create log directory {}: {}; logging to stdout only",
-            cfg.log_dir.display(), std::io::Error::new(std::io::ErrorKind::PermissionDenied, "create_dir_all failed")
+            cfg.log_dir.display(),
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "create_dir_all failed"
+            )
         );
         let (nb, _guard) = tracing_appender::non_blocking(std::io::stdout());
         fmt::layer().with_writer(nb)
@@ -272,10 +281,20 @@ async fn main() -> Result<()> {
                 .await
                 .with_context(|| "worker run after reconcile failed".to_string())?;
         }
-        Commands::ReconcilePlaylist { path, provider, trust_cache } => {
+        Commands::ReconcilePlaylist {
+            path,
+            provider,
+            trust_cache,
+        } => {
             lib::worker::reconcile_single_playlist(&cfg, &path, provider.as_deref(), trust_cache)
                 .await
-                .with_context(|| format!("reconcile-playlist {:?} provider={}", path, provider.as_deref().unwrap_or("<all>")))?;
+                .with_context(|| {
+                    format!(
+                        "reconcile-playlist {:?} provider={}",
+                        path,
+                        provider.as_deref().unwrap_or("<all>")
+                    )
+                })?;
         }
         Commands::ConfigValidate => {
             match lib::config::Config::from_path(&resolved_config_path.as_path()) {
@@ -426,8 +445,12 @@ async fn main() -> Result<()> {
                     use lib::api::spotify::SpotifyProvider;
                     let db_path = cfg.db_path.clone();
                     // Pass empty strings to load from DB
-                    let spotify =
-                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path, cfg.clone()));
+                    let spotify = Arc::new(SpotifyProvider::new(
+                        String::new(),
+                        String::new(),
+                        db_path,
+                        cfg.clone(),
+                    ));
                     let list_playlists = {
                         let spotify = spotify.clone();
                         Box::pin(async move { spotify.list_user_playlists().await })
@@ -595,7 +618,10 @@ async fn main() -> Result<()> {
             let tracked_ids: HashSet<String> = if orphan_only {
                 match rusqlite::Connection::open(&cfg.db_path) {
                     Ok(conn) => {
-                        match music_file_playlist_online_sync::db::get_all_remote_ids_for_provider(&conn, &provider_lc) {
+                        match music_file_playlist_online_sync::db::get_all_remote_ids_for_provider(
+                            &conn,
+                            &provider_lc,
+                        ) {
                             Ok(ids) => {
                                 println!("Loaded {} locally-tracked remote ID(s) for '{}' (will be excluded).", ids.len(), provider_lc);
                                 ids
@@ -620,8 +646,12 @@ async fn main() -> Result<()> {
                     use lib::api::spotify::SpotifyProvider;
 
                     let db_path = cfg.db_path.clone();
-                    let prov =
-                        Arc::new(SpotifyProvider::new(String::new(), String::new(), db_path, cfg.clone()));
+                    let prov = Arc::new(SpotifyProvider::new(
+                        String::new(),
+                        String::new(),
+                        db_path,
+                        cfg.clone(),
+                    ));
                     if !prov.is_authenticated() {
                         eprintln!("Spotify provider is not authenticated. Run auth first.");
                         std::process::exit(1);
@@ -650,7 +680,15 @@ async fn main() -> Result<()> {
                     }
 
                     if matches.is_empty() {
-                        println!("No Spotify playlists matched regex '{}'{}", name_regex, if orphan_only { " (after excluding locally-tracked)." } else { "." });
+                        println!(
+                            "No Spotify playlists matched regex '{}'{}",
+                            name_regex,
+                            if orphan_only {
+                                " (after excluding locally-tracked)."
+                            } else {
+                                "."
+                            }
+                        );
                         return Ok(());
                     }
 
@@ -730,7 +768,15 @@ async fn main() -> Result<()> {
                     }
 
                     if matches.is_empty() {
-                        println!("No Tidal playlists matched regex '{}'{}", name_regex, if orphan_only { " (after excluding locally-tracked)." } else { "." });
+                        println!(
+                            "No Tidal playlists matched regex '{}'{}",
+                            name_regex,
+                            if orphan_only {
+                                " (after excluding locally-tracked)."
+                            } else {
+                                "."
+                            }
+                        );
                         return Ok(());
                     }
 
@@ -785,11 +831,14 @@ async fn main() -> Result<()> {
                                     if entries.is_empty() {
                                         println!("No playlist_map entries found.");
                                     } else {
-                                        println!("{:<10} {:<45} {:<40} {}",
-                                            "PROVIDER", "PLAYLIST KEY", "REMOTE ID", "DISPLAY NAME");
+                                        println!(
+                                            "{:<10} {:<45} {:<40} {}",
+                                            "PROVIDER", "PLAYLIST KEY", "REMOTE ID", "DISPLAY NAME"
+                                        );
                                         println!("{}", "-".repeat(130));
                                         for (prov, pl, rid, dn, _synced) in &entries {
-                                            println!("{:<10} {:<45} {:<40} {}",
+                                            println!(
+                                                "{:<10} {:<45} {:<40} {}",
                                                 prov,
                                                 pl,
                                                 rid.as_deref().unwrap_or("(none)"),
@@ -815,9 +864,7 @@ async fn main() -> Result<()> {
                     match rusqlite::Connection::open(&cfg.db_path) {
                         Ok(conn) => {
                             match music_file_playlist_online_sync::db::delete_playlist_map(
-                                &conn,
-                                &provider,
-                                &playlist,
+                                &conn, &provider, &playlist,
                             ) {
                                 Ok(()) => {
                                     println!(

@@ -1,11 +1,24 @@
-use music_file_playlist_online_sync as lib;
 use lib::db;
 use mockito::Server;
+use music_file_playlist_online_sync as lib;
 use serde_json::json;
 use std::path::PathBuf;
 
-fn save_credentials(conn: &rusqlite::Connection, provider: &str, token_json: &str, client_id: &str, client_secret: &str) {
-    db::save_credential_raw(conn, provider, token_json, Some(client_id), Some(client_secret)).expect("save cred");
+fn save_credentials(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    token_json: &str,
+    client_id: &str,
+    client_secret: &str,
+) {
+    db::save_credential_raw(
+        conn,
+        provider,
+        token_json,
+        Some(client_id),
+        Some(client_secret),
+    )
+    .expect("save cred");
 }
 
 #[test]
@@ -40,7 +53,12 @@ fn spotify_token_refresh_success_and_preserve_client() {
     save_credentials(&conn, "spotify", &init_token, "test_id", "test_secret");
     std::env::set_var("SPOTIFY_AUTH_BASE", &base);
 
-    let provider = lib::api::spotify::SpotifyProvider::new(String::new(), String::new(), db_path.clone(), Default::default());
+    let provider = lib::api::spotify::SpotifyProvider::new(
+        String::new(),
+        String::new(),
+        db_path.clone(),
+        Default::default(),
+    );
     // debug: ensure client credentials are loaded correctly
     let (cid, csecret) = provider.creds();
     eprintln!("spotify provider creds id='{}' secret='{}'", cid, csecret);
@@ -57,8 +75,20 @@ fn spotify_token_refresh_success_and_preserve_client() {
         }
     }
 
-    let client_id: Option<String> = conn.query_row("SELECT client_id FROM credentials WHERE provider = 'spotify'", [], |r| r.get(0)).expect("client_id");
-    let client_secret: Option<String> = conn.query_row("SELECT client_secret FROM credentials WHERE provider = 'spotify'", [], |r| r.get(0)).expect("client_secret");
+    let client_id: Option<String> = conn
+        .query_row(
+            "SELECT client_id FROM credentials WHERE provider = 'spotify'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("client_id");
+    let client_secret: Option<String> = conn
+        .query_row(
+            "SELECT client_secret FROM credentials WHERE provider = 'spotify'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("client_secret");
     assert_eq!(client_id.unwrap_or_default(), "test_id");
     assert_eq!(client_secret.unwrap_or_default(), "test_secret");
 }
@@ -92,7 +122,12 @@ fn spotify_token_refresh_failure_invalid_client() {
     db::save_credential_raw(&conn, "spotify", &init_token, None, None).expect("save empty");
     std::env::set_var("SPOTIFY_AUTH_BASE", &base);
 
-    let provider = lib::api::spotify::SpotifyProvider::new(String::new(), String::new(), db_path.clone(), Default::default());
+    let provider = lib::api::spotify::SpotifyProvider::new(
+        String::new(),
+        String::new(),
+        db_path.clone(),
+        Default::default(),
+    );
     let rt = tokio::runtime::Runtime::new().expect("rt");
     let res = rt.block_on(provider.get_bearer());
     assert!(res.is_err());
@@ -130,7 +165,13 @@ fn tidal_token_refresh_success_and_preserve_client() {
     save_credentials(&conn, "tidal", &init_token, "test_id", "test_secret");
     std::env::set_var("TIDAL_AUTH_BASE", &base);
 
-    let provider = lib::api::tidal::TidalProvider::new(String::new(), String::new(), db_path.clone(), None, Default::default());
+    let provider = lib::api::tidal::TidalProvider::new(
+        String::new(),
+        String::new(),
+        db_path.clone(),
+        None,
+        Default::default(),
+    );
     let (tid, tsecret) = provider.creds();
     eprintln!("tidal provider creds id='{}' secret='{}'", tid, tsecret);
     let rt = tokio::runtime::Runtime::new().expect("rt");
@@ -147,8 +188,20 @@ fn tidal_token_refresh_success_and_preserve_client() {
         }
     }
 
-    let client_id: Option<String> = conn.query_row("SELECT client_id FROM credentials WHERE provider = 'tidal'", [], |r| r.get(0)).expect("client_id");
-    let client_secret: Option<String> = conn.query_row("SELECT client_secret FROM credentials WHERE provider = 'tidal'", [], |r| r.get(0)).expect("client_secret");
+    let client_id: Option<String> = conn
+        .query_row(
+            "SELECT client_id FROM credentials WHERE provider = 'tidal'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("client_id");
+    let client_secret: Option<String> = conn
+        .query_row(
+            "SELECT client_secret FROM credentials WHERE provider = 'tidal'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("client_secret");
     assert_eq!(client_id.unwrap_or_default(), "test_id");
     assert_eq!(client_secret.unwrap_or_default(), "test_secret");
 }
@@ -181,7 +234,13 @@ fn tidal_token_refresh_failure_invalid_client() {
     db::save_credential_raw(&conn, "tidal", &init_token, None, None).expect("save empty");
     std::env::set_var("TIDAL_AUTH_BASE", &base);
 
-    let provider = lib::api::tidal::TidalProvider::new(String::new(), String::new(), db_path.clone(), None, Default::default());
+    let provider = lib::api::tidal::TidalProvider::new(
+        String::new(),
+        String::new(),
+        db_path.clone(),
+        None,
+        Default::default(),
+    );
     let rt = tokio::runtime::Runtime::new().expect("rt");
     let res = rt.block_on(provider.get_bearer());
     if res.is_err() {
@@ -195,4 +254,3 @@ fn tidal_token_refresh_failure_invalid_client() {
         assert_eq!(bearer, "Bearer old");
     }
 }
-

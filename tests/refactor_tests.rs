@@ -3,9 +3,9 @@
 //! all_providers_ok logic that prevents events from being marked synced
 //! when a provider fails.
 
-use music_file_playlist_online_sync::{api, db, models};
 use music_file_playlist_online_sync::api::Provider;
 use music_file_playlist_online_sync::models::EventAction;
+use music_file_playlist_online_sync::{api, db, models};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ fn tidal_provider_validate_uri() {
     // Valid tidal URIs: end with a positive numeric id
     assert!(tp.validate_uri("tidal:track:123456"));
     assert!(tp.validate_uri("tidal:track:1"));
-    
+
     // Invalid: zero, non-numeric, empty
     assert!(!tp.validate_uri("tidal:track:0"));
     assert!(!tp.validate_uri("tidal:track:abc"));
@@ -120,24 +120,36 @@ struct FailingProvider;
 
 #[async_trait::async_trait]
 impl Provider for FailingProvider {
-    fn name(&self) -> &str { "failing" }
-    fn is_authenticated(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "failing"
+    }
+    fn is_authenticated(&self) -> bool {
+        true
+    }
     async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> {
         Ok("pl_id".to_string())
     }
-    async fn rename_playlist(&self, _id: &str, _name: &str) -> anyhow::Result<()> { Ok(()) }
+    async fn rename_playlist(&self, _id: &str, _name: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn add_tracks(&self, _id: &str, _uris: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("simulated failure")
     }
-    async fn remove_tracks(&self, _id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-    async fn delete_playlist(&self, _id: &str) -> anyhow::Result<()> { Ok(()) }
+    async fn remove_tracks(&self, _id: &str, _uris: &[String]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn delete_playlist(&self, _id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn search_track_uri(&self, _t: &str, _a: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
     async fn list_playlist_tracks(&self, _id: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
-    async fn playlist_is_valid(&self, _id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
+    async fn playlist_is_valid(&self, _id: &str) -> anyhow::Result<Option<String>> {
+        Ok(Some(String::new()))
+    }
     async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
@@ -190,7 +202,11 @@ async fn events_not_synced_when_provider_fails() {
         let conn = pool.get().unwrap();
         db::fetch_unsynced_events(&conn).unwrap()
     };
-    assert_eq!(still_unsynced.len(), 1, "Event should NOT be synced when provider fails");
+    assert_eq!(
+        still_unsynced.len(),
+        1,
+        "Event should NOT be synced when provider fails"
+    );
     assert_eq!(still_unsynced[0].id, event_id);
 }
 
@@ -222,7 +238,11 @@ async fn events_synced_when_all_providers_ok() {
         let conn = pool.get().unwrap();
         db::fetch_unsynced_events(&conn).unwrap()
     };
-    assert_eq!(remaining.len(), 0, "Event should be synced when all providers OK");
+    assert_eq!(
+        remaining.len(),
+        0,
+        "Event should be synced when all providers OK"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +257,10 @@ fn should_precompute_desired_matrix() {
     assert!(should_precompute_desired(false, false, false));
 
     // Any of these should prevent precompute
-    assert!(!should_precompute_desired(true, false, false));  // has delete
-    assert!(!should_precompute_desired(false, true, false));   // has track ops
-    assert!(!should_precompute_desired(false, false, true));   // has rename
-    assert!(!should_precompute_desired(true, true, true));     // all three
+    assert!(!should_precompute_desired(true, false, false)); // has delete
+    assert!(!should_precompute_desired(false, true, false)); // has track ops
+    assert!(!should_precompute_desired(false, false, true)); // has rename
+    assert!(!should_precompute_desired(true, true, true)); // all three
 }
 
 // ---------------------------------------------------------------------------
@@ -255,12 +275,19 @@ async fn retry_with_backoff_respects_max_retries() {
     let attempts_clone = attempts.clone();
 
     let result = retry_with_backoff(
-        &RetryConfig { max_attempts: 4, max_backoff_secs: 1, label: "test".into() },
+        &RetryConfig {
+            max_attempts: 4,
+            max_backoff_secs: 1,
+            label: "test".into(),
+        },
         move |_attempt| {
             let a = attempts_clone.clone();
             async move {
                 a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                RetryAction::Retry { error: anyhow::anyhow!("always fail"), retry_after: Some(0) }
+                RetryAction::Retry {
+                    error: anyhow::anyhow!("always fail"),
+                    retry_after: Some(0),
+                }
             }
         },
     )
@@ -280,12 +307,39 @@ fn collapse_dedup_preserves_order() {
     use music_file_playlist_online_sync::collapse::collapse_events;
 
     let events = vec![
-        models::Event { id: 1, timestamp_ms: 0, playlist_name: "a".into(), action: EventAction::Add, track_path: Some("t1.mp3".into()), extra: None, is_synced: false },
-        models::Event { id: 2, timestamp_ms: 0, playlist_name: "a".into(), action: EventAction::Add, track_path: Some("t2.mp3".into()), extra: None, is_synced: false },
-        models::Event { id: 3, timestamp_ms: 0, playlist_name: "a".into(), action: EventAction::Add, track_path: Some("t3.mp3".into()), extra: None, is_synced: false },
+        models::Event {
+            id: 1,
+            timestamp_ms: 0,
+            playlist_name: "a".into(),
+            action: EventAction::Add,
+            track_path: Some("t1.mp3".into()),
+            extra: None,
+            is_synced: false,
+        },
+        models::Event {
+            id: 2,
+            timestamp_ms: 0,
+            playlist_name: "a".into(),
+            action: EventAction::Add,
+            track_path: Some("t2.mp3".into()),
+            extra: None,
+            is_synced: false,
+        },
+        models::Event {
+            id: 3,
+            timestamp_ms: 0,
+            playlist_name: "a".into(),
+            action: EventAction::Add,
+            track_path: Some("t3.mp3".into()),
+            extra: None,
+            is_synced: false,
+        },
     ];
 
     let collapsed = collapse_events(&events);
-    let paths: Vec<_> = collapsed.iter().map(|e| e.track_path.as_deref().unwrap_or("")).collect();
+    let paths: Vec<_> = collapsed
+        .iter()
+        .map(|e| e.track_path.as_deref().unwrap_or(""))
+        .collect();
     assert_eq!(paths, vec!["t1.mp3", "t2.mp3", "t3.mp3"]);
 }

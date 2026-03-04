@@ -11,7 +11,9 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub fn new() -> Self {
-        Self { client: reqwest::Client::new() }
+        Self {
+            client: reqwest::Client::new(),
+        }
     }
     fn is_authenticated(&self) -> bool {
         false

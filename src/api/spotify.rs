@@ -255,7 +255,12 @@ impl SpotifyProvider {
             .await;
         }
     }
-    pub fn new(client_id: String, client_secret: String, db_path: std::path::PathBuf, config: crate::config::Config) -> Self {
+    pub fn new(
+        client_id: String,
+        client_secret: String,
+        db_path: std::path::PathBuf,
+        config: crate::config::Config,
+    ) -> Self {
         // If either client_id or client_secret is empty, try to load from DB
         let (client_id, client_secret) = if client_id.is_empty() || client_secret.is_empty() {
             if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -334,13 +339,7 @@ impl SpotifyProvider {
         let client_secret = self.client_secret.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::save_credential_raw(
-                &conn,
-                "spotify",
-                &s,
-                Some(&client_id),
-                Some(&client_secret),
-            )?;
+            db::save_credential_raw(&conn, "spotify", &s, Some(&client_id), Some(&client_secret))?;
             Ok(())
         })
         .await??;
@@ -600,7 +599,9 @@ impl Provider for SpotifyProvider {
             urlencoding::encode(&q)
         );
         let spec = RequestSpec::get(&url).header("accept", "application/json");
-        let resp = self.execute_request("search_track_uri_by_isrc", &spec).await?;
+        let resp = self
+            .execute_request("search_track_uri_by_isrc", &spec)
+            .await?;
         if !resp.status().is_success() {
             return Ok(None);
         }

@@ -19,7 +19,9 @@ pub fn create_pool(path: &Path) -> Result<DbPool> {
         .with_context(|| format!("building DB pool for {}", path.display()))?;
     // Run migrations on a fresh connection from the pool.
     {
-        let conn = pool.get().with_context(|| "getting pool connection for migrations")?;
+        let conn = pool
+            .get()
+            .with_context(|| "getting pool connection for migrations")?;
         run_migrations(&conn)?;
     }
     Ok(pool)
@@ -161,7 +163,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // transparently on the next worker run.
     {
         let has_provider_col: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('playlist_cache') WHERE name = 'provider_name'")
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('playlist_cache') WHERE name = 'provider_name'",
+            )
             .and_then(|mut s| s.exists([]))
             .unwrap_or(false);
 
@@ -361,9 +365,8 @@ pub fn get_remote_display_name(
     playlist_name: &str,
 ) -> Result<Option<String>> {
     let key = playlist_map_key(provider, playlist_name);
-    let mut stmt = conn.prepare(
-        "SELECT remote_display_name FROM playlist_map WHERE playlist_name = ?1 LIMIT 1",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT remote_display_name FROM playlist_map WHERE playlist_name = ?1 LIMIT 1")?;
     let row = stmt
         .query_row(params![key], |r| r.get::<_, Option<String>>(0))
         .optional()?;
@@ -394,9 +397,7 @@ pub fn get_all_remote_ids_for_provider(
     let mut stmt = conn.prepare(
         "SELECT remote_id FROM playlist_map WHERE playlist_name LIKE ?1 AND remote_id IS NOT NULL",
     )?;
-    let rows = stmt.query_map(params![format!("{}%", prefix)], |r| {
-        r.get::<_, String>(0)
-    })?;
+    let rows = stmt.query_map(params![format!("{}%", prefix)], |r| r.get::<_, String>(0))?;
     let mut ids = std::collections::HashSet::new();
     for row in rows {
         ids.insert(row?);
@@ -467,7 +468,6 @@ pub fn migrate_playlist_map(
     }
     Ok(())
 }
-
 
 /// Lookup a playlist cache entry by logical playlist name and provider.
 /// Returns (file_mtime, file_size, file_hash, uris_json) if an entry exists.
@@ -565,7 +565,8 @@ pub fn migrate_playlist_cache(
     from_playlist_name: &str,
     to_playlist_name: &str,
 ) -> Result<()> {
-    if let Some((mtime, size, hash, uris)) = get_playlist_cache(conn, from_playlist_name, provider)? {
+    if let Some((mtime, size, hash, uris)) = get_playlist_cache(conn, from_playlist_name, provider)?
+    {
         upsert_playlist_cache(conn, to_playlist_name, provider, mtime, size, &hash, &uris)?;
         conn.execute(
             "DELETE FROM playlist_cache WHERE playlist_name = ?1 AND provider_name = ?2",
@@ -574,7 +575,6 @@ pub fn migrate_playlist_cache(
     }
     Ok(())
 }
-
 
 fn track_cache_key(provider: &str, local_path: &str) -> String {
     // All providers are now namespaced in the cache key.  In the very first
@@ -712,7 +712,12 @@ pub fn get_playlist_item_id_cache(
     conn: &Connection,
     provider: &str,
     remote_id: &str,
-) -> Result<Option<(std::collections::HashMap<String, Vec<String>>, Option<String>)>> {
+) -> Result<
+    Option<(
+        std::collections::HashMap<String, Vec<String>>,
+        Option<String>,
+    )>,
+> {
     let mut stmt = conn.prepare(
         "SELECT item_ids_json, etag FROM remote_playlist_item_id_cache \
          WHERE provider_name = ?1 AND remote_id = ?2 LIMIT 1",
@@ -802,8 +807,13 @@ pub fn get_provider_playlist_list_cache(
             Ok(None)
         }
         Some((json, _)) => {
-            let entries: Vec<(String, String)> = serde_json::from_str(&json)
-                .with_context(|| format!("deserializing provider_playlist_list_cache for {}", provider))?;
+            let entries: Vec<(String, String)> =
+                serde_json::from_str(&json).with_context(|| {
+                    format!(
+                        "deserializing provider_playlist_list_cache for {}",
+                        provider
+                    )
+                })?;
             Ok(Some(entries))
         }
     }

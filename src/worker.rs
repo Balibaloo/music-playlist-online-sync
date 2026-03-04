@@ -115,16 +115,26 @@ pub async fn desired_remote_uris_for_playlist(
         let pool = db_pool.clone();
         let playlist_name = playlist_name.to_string();
         let provider_name_for_cache = provider.name().to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<(i64, i64, String, String)>, anyhow::Error> {
-            let conn = pool.get()?;
-            Ok(db::get_playlist_cache(&conn, &playlist_name, &provider_name_for_cache)?)
-        })
+        tokio::task::spawn_blocking(
+            move || -> Result<Option<(i64, i64, String, String)>, anyhow::Error> {
+                let conn = pool.get()?;
+                Ok(db::get_playlist_cache(
+                    &conn,
+                    &playlist_name,
+                    &provider_name_for_cache,
+                )?)
+            },
+        )
         .await??
     } {
-        let cache_valid = cached_mtime == file_mtime && cached_size == file_size && cached_hash == file_hash;
+        let cache_valid =
+            cached_mtime == file_mtime && cached_size == file_size && cached_hash == file_hash;
         if cache_valid || trust_cache {
             if trust_cache && !cache_valid {
-                log::debug!("trust_cache=true: trusting stale playlist cache for {}", playlist_name);
+                log::debug!(
+                    "trust_cache=true: trusting stale playlist cache for {}",
+                    playlist_name
+                );
             }
             // parse the cached JSON and return
             let uris: Vec<String> = serde_json::from_str(&uris_json).unwrap_or_default();
@@ -169,18 +179,17 @@ pub async fn desired_remote_uris_for_playlist(
         let pool = db_pool.clone();
         let provider_name_for_lookup = provider_name.clone();
         let local_path_for_lookup = local_path_str.clone();
-        let cached: Option<(Option<String>, Option<String>, i64)> =
-            tokio::task::spawn_blocking(
-                move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
-                    let conn = pool.get()?;
-                    Ok(db::get_track_cache_by_local(
-                        &conn,
-                        &provider_name_for_lookup,
-                        &local_path_for_lookup,
-                    )?)
-                },
-            )
-            .await??;
+        let cached: Option<(Option<String>, Option<String>, i64)> = tokio::task::spawn_blocking(
+            move || -> Result<Option<(Option<String>, Option<String>, i64)>, anyhow::Error> {
+                let conn = pool.get()?;
+                Ok(db::get_track_cache_by_local(
+                    &conn,
+                    &provider_name_for_lookup,
+                    &local_path_for_lookup,
+                )?)
+            },
+        )
+        .await??;
 
         if let Some((_cached_isrc, cached_remote_id, resolved_at)) = &cached {
             if let Some(uri) = cached_remote_id {
@@ -361,8 +370,6 @@ pub async fn desired_remote_uris_for_playlist(
     Ok((uris, local_track_count))
 }
 
-
-
 /// Decide whether we should pre‑compute the set of desired remote URIs for a
 /// playlist before performing any reconciliation work.
 ///
@@ -405,7 +412,12 @@ pub fn should_precompute_desired(has_delete: bool, has_track_ops: bool, has_rena
 /// - "${relative_path}"  -> legacy alias, expanded as
 ///                            `path_to_parent + folder_name` so that existing
 ///                            configs continue to work.
-fn compute_remote_playlist_name(cfg: &Config, _provider_name: &str, playlist_key: &str, supports_folders: bool) -> String {
+fn compute_remote_playlist_name(
+    cfg: &Config,
+    _provider_name: &str,
+    playlist_key: &str,
+    supports_folders: bool,
+) -> String {
     let root = cfg.online_root_playlist.trim();
     let structure = cfg.online_playlist_structure.as_str();
     let delim_cfg = cfg.online_folder_flattening_delimiter.as_str();
@@ -576,10 +588,7 @@ async fn apply_in_batches(
                         log::warn!(
                             "{} {} {} rate_limited wait_s={} error={}",
                             log_run_tag(worker_id),
-                            log_playlist_tag(
-                                playlist_name,
-                                &prov_name
-                            ),
+                            log_playlist_tag(playlist_name, &prov_name),
                             log_phase_tag(phase),
                             wait,
                             e
@@ -589,25 +598,18 @@ async fn apply_in_batches(
                         log::info!(
                             "{} {} {} Sleeping for {} seconds",
                             log_run_tag(worker_id),
-                            log_playlist_tag(
-                                playlist_name,
-                                &prov_name
-                            ),
+                            log_playlist_tag(playlist_name, &prov_name),
                             log_phase_tag(phase),
                             wait + 1
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(wait + 1))
-                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(wait + 1)).await;
                         // continue retrying until max_retries_on_error
                         if attempt >= cfg.max_retries_on_error {
                             let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                             log::error!(
                                 "{} {} {} rate_limit_give_up attempts={} error={}",
                                 log_run_tag(worker_id),
-                                log_playlist_tag(
-                                    playlist_name,
-                                    &prov_name
-                                ),
+                                log_playlist_tag(playlist_name, &prov_name),
                                 log_phase_tag(phase),
                                 attempt,
                                 e
@@ -627,10 +629,7 @@ async fn apply_in_batches(
                             log::warn!(
                                 "{} {} {} playlist_missing_for_batch id={}",
                                 log_run_tag(worker_id),
-                                log_playlist_tag(
-                                    playlist_name,
-                                    &prov_name
-                                ),
+                                log_playlist_tag(playlist_name, &prov_name),
                                 log_phase_tag(phase),
                                 playlist_id
                             );
@@ -644,10 +643,7 @@ async fn apply_in_batches(
 
                             // Recreate the playlist via ensure_playlist using the
                             // current display name, then update playlist_map.
-                            match provider
-                                .ensure_playlist(remote_display_name, "")
-                                .await
-                            {
+                            match provider.ensure_playlist(remote_display_name, "").await {
                                 Ok(new_id) => {
                                     let pool = db_pool.clone();
                                     let pl = playlist_name.to_string();
@@ -656,8 +652,7 @@ async fn apply_in_batches(
                                     let dn = remote_display_name.to_string();
                                     tokio::task::spawn_blocking(
                                         move || -> Result<(), anyhow::Error> {
-                                            let conn =
-                                                pool.get()?;
+                                            let conn = pool.get()?;
                                             crate::db::upsert_playlist_map(
                                                 &conn,
                                                 &prov,
@@ -665,10 +660,7 @@ async fn apply_in_batches(
                                                 &new_id_clone,
                                             )?;
                                             crate::db::set_remote_display_name(
-                                                &conn,
-                                                &prov,
-                                                &pl,
-                                                &dn,
+                                                &conn, &prov, &pl, &dn,
                                             )?;
                                             Ok(())
                                         },
@@ -676,8 +668,7 @@ async fn apply_in_batches(
                                     .await??;
 
                                     *playlist_id = new_id;
-                                    let phase =
-                                        if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                    let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                     log::info!(
                                         "{} {} {} playlist_recreated_for_batch new_id={}",
                                         log_run_tag(worker_id),
@@ -695,8 +686,7 @@ async fn apply_in_batches(
                                     continue;
                                 }
                                 Err(err) => {
-                                    let phase =
-                                        if is_add { "BATCH_ADD" } else { "BATCH_REM" };
+                                    let phase = if is_add { "BATCH_ADD" } else { "BATCH_REM" };
                                     log::error!(
                                         "{} {} {} playlist_recreate_for_batch_failed error={}",
                                         log_run_tag(worker_id),
@@ -713,10 +703,7 @@ async fn apply_in_batches(
                             log::error!(
                                 "{} {} {} batch_give_up attempts={} error={}",
                                 log_run_tag(worker_id),
-                                log_playlist_tag(
-                                    playlist_name,
-                                    &prov_name
-                                ),
+                                log_playlist_tag(playlist_name, &prov_name),
                                 log_phase_tag(phase),
                                 attempt,
                                 e
@@ -728,10 +715,7 @@ async fn apply_in_batches(
                             log::warn!(
                                 "{} {} {} batch_retry attempt={} error={} backoff_s={}",
                                 log_run_tag(worker_id),
-                                log_playlist_tag(
-                                    playlist_name,
-                                    &prov_name
-                                ),
+                                log_playlist_tag(playlist_name, &prov_name),
                                 log_phase_tag(phase),
                                 attempt,
                                 e,
@@ -740,15 +724,11 @@ async fn apply_in_batches(
                             log::info!(
                                 "{} {} {} Sleeping for {} seconds",
                                 log_run_tag(worker_id),
-                                log_playlist_tag(
-                                    playlist_name,
-                                    &prov_name
-                                ),
+                                log_playlist_tag(playlist_name, &prov_name),
                                 log_phase_tag(phase),
                                 exp
                             );
-                            tokio::time::sleep(std::time::Duration::from_secs(exp))
-                                .await;
+                            tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
                             continue;
                         }
                     }
@@ -759,7 +739,11 @@ async fn apply_in_batches(
     Ok(())
 }
 
-pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_cache: bool) -> Result<()> {
+pub async fn run_worker_once(
+    cfg: &Config,
+    provider_filter: Option<&str>,
+    trust_cache: bool,
+) -> Result<()> {
     let worker_id = Uuid::new_v4().to_string();
 
     // Create a connection pool and run migrations once.
@@ -776,9 +760,7 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
         let wid = worker_id.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
-                log::info!(
-                    "Ctrl-C received; releasing active playlist locks before exit..."
-                );
+                log::info!("Ctrl-C received; releasing active playlist locks before exit...");
                 let locks = active_locks.lock().unwrap().clone();
                 for playlist_name in &locks {
                     release_lock_async(&pool, playlist_name, &wid).await;
@@ -930,14 +912,10 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
         let mut track_ops: Vec<(EventAction, Option<String>)> = Vec::new();
         for op in &collapsed {
             match &op.action {
-                EventAction::Rename { from, to } => {
-                    rename_opt = Some((from.clone(), to.clone()))
-                }
+                EventAction::Rename { from, to } => rename_opt = Some((from.clone(), to.clone())),
                 EventAction::Delete => has_delete = true,
                 EventAction::Add => track_ops.push((EventAction::Add, op.track_path.clone())),
-                EventAction::Remove => {
-                    track_ops.push((EventAction::Remove, op.track_path.clone()))
-                }
+                EventAction::Remove => track_ops.push((EventAction::Remove, op.track_path.clone())),
                 _ => {}
             }
         }
@@ -951,20 +929,12 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                 .join(from_name)
                 .to_string_lossy()
                 .to_string();
-            let new_prefix = cfg
-                .root_folder
-                .join(to_name)
-                .to_string_lossy()
-                .to_string();
+            let new_prefix = cfg.root_folder.join(to_name).to_string_lossy().to_string();
             for (_action, track_path_opt) in track_ops.iter_mut() {
                 if let Some(tp) = track_path_opt {
                     if tp.starts_with(&old_prefix) {
                         let rewritten = format!("{}{}", new_prefix, &tp[old_prefix.len()..]);
-                        log::debug!(
-                            "rename_rewrite: {} -> {}",
-                            tp,
-                            rewritten
-                        );
+                        log::debug!("rename_rewrite: {} -> {}", tp, rewritten);
                         *tp = rewritten;
                     }
                 }
@@ -1090,10 +1060,8 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                                         log_phase_tag("DELETE"),
                                         sleep_secs
                                     );
-                                    tokio::time::sleep(std::time::Duration::from_secs(
-                                        sleep_secs,
-                                    ))
-                                    .await;
+                                    tokio::time::sleep(std::time::Duration::from_secs(sleep_secs))
+                                        .await;
                                     continue;
                                 }
                             }
@@ -1166,7 +1134,15 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                     pl_tag,
                     log_phase_tag("RESOLVE")
                 );
-                match desired_remote_uris_for_playlist(cfg, playlist_name, provider.clone(), &db_pool, trust_cache).await {
+                match desired_remote_uris_for_playlist(
+                    cfg,
+                    playlist_name,
+                    provider.clone(),
+                    &db_pool,
+                    trust_cache,
+                )
+                .await
+                {
                     Ok((desired, local_track_count)) => {
                         log::info!(
                             "{} {} {} reconcile_desired_uris_computed count={} local_track_count={}",
@@ -1206,8 +1182,12 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
             }
 
             // Compute the desired remote display name for this playlist on this provider.
-            let remote_display_name =
-                compute_remote_playlist_name(cfg, provider.name(), playlist_name, provider.supports_folder_nesting());
+            let remote_display_name = compute_remote_playlist_name(
+                cfg,
+                provider.name(),
+                playlist_name,
+                provider.supports_folder_nesting(),
+            );
 
             let mut remote_id = if let Some(rid) = remote_id_opt {
                 rid
@@ -1261,127 +1241,138 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                     log_phase_tag("REMOTE_ID")
                 );
             } else {
-            {
-                let mut attempt = 0u32;
-                loop {
-                    attempt += 1;
-                    match provider.playlist_is_valid(&remote_id).await {
-                        Ok(None) => {
-                            log::warn!(
-                                "{} {} {} remote_playlist_inaccessible id={}",
-                                log_run_tag(&worker_id),
-                                pl_tag,
-                                log_phase_tag("REMOTE_ID"),
-                                remote_id
-                            );
-                            match provider.ensure_playlist(&remote_display_name, "").await {
-                                Ok(new_id) => {
+                {
+                    let mut attempt = 0u32;
+                    loop {
+                        attempt += 1;
+                        match provider.playlist_is_valid(&remote_id).await {
+                            Ok(None) => {
+                                log::warn!(
+                                    "{} {} {} remote_playlist_inaccessible id={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("REMOTE_ID"),
+                                    remote_id
+                                );
+                                match provider.ensure_playlist(&remote_display_name, "").await {
+                                    Ok(new_id) => {
+                                        let pool = db_pool.clone();
+                                        let pl = playlist_name.clone();
+                                        let prov = provider_name.clone();
+                                        let new_id_clone = new_id.clone();
+                                        let dn = remote_display_name.clone();
+                                        tokio::task::spawn_blocking(
+                                            move || -> Result<(), anyhow::Error> {
+                                                let conn = pool.get()?;
+                                                db::upsert_playlist_map(
+                                                    &conn,
+                                                    &prov,
+                                                    &pl,
+                                                    &new_id_clone,
+                                                )?;
+                                                db::set_remote_display_name(
+                                                    &conn, &prov, &pl, &dn,
+                                                )?;
+                                                Ok(())
+                                            },
+                                        )
+                                        .await??;
+
+                                        log::info!(
+                                            "{} {} {} remote_playlist_recreated new_id={}",
+                                            log_run_tag(&worker_id),
+                                            pl_tag,
+                                            log_phase_tag("REMOTE_ID"),
+                                            new_id
+                                        );
+                                        remote_id = new_id;
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "{} {} {} remote_playlist_recreate_failed error={}",
+                                            log_run_tag(&worker_id),
+                                            pl_tag,
+                                            log_phase_tag("REMOTE_ID"),
+                                            e
+                                        );
+
+                                        // Release lock and skip further processing for this playlist.
+                                        active_locks.lock().unwrap().retain(|n| n != playlist_name);
+                                        release_lock_async(&db_pool, playlist_name, &worker_id)
+                                            .await;
+                                        all_providers_ok = false;
+                                        continue;
+                                    }
+                                }
+                                break;
+                            }
+                            Ok(Some(current_remote_name)) => {
+                                // Opportunistically cache the remote display name
+                                // that the provider already fetched.
+                                if !current_remote_name.is_empty() {
                                     let pool = db_pool.clone();
                                     let pl = playlist_name.clone();
                                     let prov = provider_name.clone();
-                                    let new_id_clone = new_id.clone();
-                                    let dn = remote_display_name.clone();
-                                    tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                                        let conn = pool.get()?;
-                                        db::upsert_playlist_map(&conn, &prov, &pl, &new_id_clone)?;
-                                        db::set_remote_display_name(&conn, &prov, &pl, &dn)?;
-                                        Ok(())
+                                    let rn = current_remote_name.clone();
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        if let Ok(conn) = pool.get() {
+                                            let _ =
+                                                db::set_remote_display_name(&conn, &prov, &pl, &rn);
+                                        }
                                     })
-                                    .await??;
-
-                                    log::info!(
-                                        "{} {} {} remote_playlist_recreated new_id={}",
-                                        log_run_tag(&worker_id),
-                                        pl_tag,
-                                        log_phase_tag("REMOTE_ID"),
-                                        new_id
-                                    );
-                                    remote_id = new_id;
+                                    .await;
                                 }
-                                Err(e) => {
-                                    log::error!(
-                                        "{} {} {} remote_playlist_recreate_failed error={}",
+                                // normal case, keep existing id
+                                break;
+                            }
+                            Err(e) => {
+                                let s = format!("{}", e);
+                                if s.contains("rate_limited") || s.contains("429") {
+                                    // back off and retry
+                                    let exp = std::cmp::min(1u64 << attempt, 60);
+                                    log::warn!(
+                                        "{} {} {} rate_limited remote_id_wait_s={} error={}",
                                         log_run_tag(&worker_id),
                                         pl_tag,
                                         log_phase_tag("REMOTE_ID"),
+                                        exp,
                                         e
                                     );
-
-                                    // Release lock and skip further processing for this playlist.
-                                    active_locks.lock().unwrap().retain(|n| n != playlist_name);
-                                    release_lock_async(&db_pool, playlist_name, &worker_id).await;
-                                    all_providers_ok = false;
-                                    continue;
-                                }
-                            }
-                            break;
-                        }
-                        Ok(Some(current_remote_name)) => {
-                            // Opportunistically cache the remote display name
-                            // that the provider already fetched.
-                            if !current_remote_name.is_empty() {
-                                let pool = db_pool.clone();
-                                let pl = playlist_name.clone();
-                                let prov = provider_name.clone();
-                                let rn = current_remote_name.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    if let Ok(conn) = pool.get() {
-                                        let _ = db::set_remote_display_name(&conn, &prov, &pl, &rn);
-                                    }
-                                })
-                                .await;
-                            }
-                            // normal case, keep existing id
-                            break;
-                        }
-                        Err(e) => {
-                            let s = format!("{}", e);
-                            if s.contains("rate_limited") || s.contains("429") {
-                                // back off and retry
-                                let exp = std::cmp::min(1u64 << attempt, 60);
-                                log::warn!(
-                                    "{} {} {} rate_limited remote_id_wait_s={} error={}",
-                                    log_run_tag(&worker_id),
-                                    pl_tag,
-                                    log_phase_tag("REMOTE_ID"),
-                                    exp,
-                                    e
-                                );
-                                log::info!(
-                                    "{} {} {} Sleeping for {} seconds",
-                                    log_run_tag(&worker_id),
-                                    pl_tag,
-                                    log_phase_tag("REMOTE_ID"),
-                                    exp
-                                );
-                                tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
-                                if attempt >= cfg.max_retries_on_error {
-                                    log::error!(
-                                        "{} {} {} remote_id_check_give_up attempts={} error={}",
+                                    log::info!(
+                                        "{} {} {} Sleeping for {} seconds",
                                         log_run_tag(&worker_id),
                                         pl_tag,
                                         log_phase_tag("REMOTE_ID"),
-                                        attempt,
+                                        exp
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(exp)).await;
+                                    if attempt >= cfg.max_retries_on_error {
+                                        log::error!(
+                                            "{} {} {} remote_id_check_give_up attempts={} error={}",
+                                            log_run_tag(&worker_id),
+                                            pl_tag,
+                                            log_phase_tag("REMOTE_ID"),
+                                            attempt,
+                                            e
+                                        );
+                                        break;
+                                    }
+                                    continue;
+                                } else {
+                                    log::warn!(
+                                        "{} {} {} playlist_is_valid_check_failed id={} error={}",
+                                        log_run_tag(&worker_id),
+                                        pl_tag,
+                                        log_phase_tag("REMOTE_ID"),
+                                        remote_id,
                                         e
                                     );
                                     break;
                                 }
-                                continue;
-                            } else {
-                                log::warn!(
-                                    "{} {} {} playlist_is_valid_check_failed id={} error={}",
-                                    log_run_tag(&worker_id),
-                                    pl_tag,
-                                    log_phase_tag("REMOTE_ID"),
-                                    remote_id,
-                                    e
-                                );
-                                break;
                             }
                         }
                     }
                 }
-            }
             } // end else !trust_cache
 
             // If there was no explicit rename event for this playlist, still
@@ -1396,7 +1387,8 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
             // To avoid hitting the provider API every run when the name is
             // already correct, we check the cached remote display name in
             // the database and skip the PATCH if it already matches.
-            let needs_cfg_rename = if rename_opt.is_none() && remote_display_name != *playlist_name {
+            let needs_cfg_rename = if rename_opt.is_none() && remote_display_name != *playlist_name
+            {
                 let cached_name = {
                     let pool = db_pool.clone();
                     let prov = provider_name.clone();
@@ -1510,7 +1502,9 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                                             let dn = remote_display_name.clone();
                                             let _ = tokio::task::spawn_blocking(move || {
                                                 if let Ok(conn) = pool.get() {
-                                                    let _ = db::set_remote_display_name(&conn, &prov, &pl, &dn);
+                                                    let _ = db::set_remote_display_name(
+                                                        &conn, &prov, &pl, &dn,
+                                                    );
                                                 }
                                             })
                                             .await;
@@ -1568,7 +1562,12 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
 
             // Apply rename first
             if let Some((_from, to)) = rename_opt.clone() {
-                let new_remote_name = compute_remote_playlist_name(cfg, provider.name(), &to, provider.supports_folder_nesting());
+                let new_remote_name = compute_remote_playlist_name(
+                    cfg,
+                    provider.name(),
+                    &to,
+                    provider.supports_folder_nesting(),
+                );
                 let mut attempt = 0u32;
                 loop {
                     attempt += 1;
@@ -1605,7 +1604,10 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                                     )?;
                                     // Cache the new display name under the new key
                                     crate::db::set_remote_display_name(
-                                        &conn, &prov, &pl_to, &new_name_clone,
+                                        &conn,
+                                        &prov,
+                                        &pl_to,
+                                        &new_name_clone,
                                     )?;
                                     Ok(())
                                 },
@@ -1767,8 +1769,8 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                         Ok(remote_current) => {
                             // Always persist the live response so future runs
                             // with --trust-cache can skip this request.
-                            let uris_json = serde_json::to_string(&remote_current)
-                                .unwrap_or_default();
+                            let uris_json =
+                                serde_json::to_string(&remote_current).unwrap_or_default();
                             let pool = db_pool.clone();
                             let prov = provider_name.clone();
                             let pl = playlist_name.clone();
@@ -2107,7 +2109,7 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                         let pool = db_pool.clone();
                         let local_path_for_cache = tp.clone();
                         let provider_name_for_cache = provider.name().to_string();
-                        let maybe_isrc = cached.as_ref().and_then(|(i,_,_)| i.clone());
+                        let maybe_isrc = cached.as_ref().and_then(|(i, _, _)| i.clone());
                         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                             let conn = pool.get()?;
                             let _ = crate::db::upsert_track_cache(
@@ -2138,7 +2140,6 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
                 let mut seen: HashSet<String> = HashSet::new();
                 remove_uris.retain(|u| seen.insert(u.clone()));
             }
-
 
             // Snapshot add/remove sets before they are moved into apply_in_batches
             // so that we can update remote_playlist_contents_cache after successful
@@ -2202,9 +2203,7 @@ pub async fn run_worker_once(cfg: &Config, provider_filter: Option<&str>, trust_
             // applying the add/remove delta to the cached pre-mutation snapshot.
             // This ensures a subsequent `--trust-cache` run sees the correct remote
             // state and does not re-apply the same mutations.
-            if batches_ok
-                && (!snapshot_add_uris.is_empty() || !snapshot_remove_uris.is_empty())
-            {
+            if batches_ok && (!snapshot_add_uris.is_empty() || !snapshot_remove_uris.is_empty()) {
                 let pool = db_pool.clone();
                 let prov = provider_name.clone();
                 let pl = playlist_name.clone();
@@ -2407,7 +2406,10 @@ pub async fn purge_deleted_playlists(cfg: &Config) -> Result<()> {
         move || -> Result<Vec<(String, String, Option<String>)>, anyhow::Error> {
             let conn = pool.get()?;
             let rows = db::list_playlist_map_entries(&conn, None)?;
-            Ok(rows.into_iter().map(|(p, pl, rid, _, _)| (p, pl, rid)).collect())
+            Ok(rows
+                .into_iter()
+                .map(|(p, pl, rid, _, _)| (p, pl, rid))
+                .collect())
         }
     })
     .await??;
@@ -2497,7 +2499,9 @@ pub async fn purge_deleted_playlists(cfg: &Config) -> Result<()> {
                             log::warn!(
                                 "purge_deleted_playlists: failed to delete remote playlist \
                                  provider={} id={}: {} – DB entry will still be removed",
-                                provider_name, rid, e
+                                provider_name,
+                                rid,
+                                e
                             );
                             // We still remove the DB entry so it doesn't block future reconciles.
                         }
@@ -2507,7 +2511,8 @@ pub async fn purge_deleted_playlists(cfg: &Config) -> Result<()> {
                     log::warn!(
                         "purge_deleted_playlists: provider '{}' not authenticated – \
                          cannot delete remote playlist id={}, removing DB entry only",
-                        provider_name, rid
+                        provider_name,
+                        rid
                     );
                     skipped += 1;
                 }
@@ -2567,10 +2572,7 @@ pub async fn reconcile_single_playlist(
     // use the parent so the playlist key matches what the nightly reconcile
     // and the worker expect (i.e. the relative folder path, not file path).
     let folder = if folder.is_file() {
-        folder
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or(folder)
+        folder.parent().map(|p| p.to_path_buf()).unwrap_or(folder)
     } else {
         folder
     };
@@ -2582,18 +2584,10 @@ pub async fn reconcile_single_playlist(
         .with_context(|| format!("cannot canonicalize root_folder {:?}", cfg.root_folder))?;
     let rel = folder
         .strip_prefix(&root)
-        .with_context(|| {
-            format!(
-                "path {:?} is not under root_folder {:?}",
-                folder, root
-            )
-        })?
+        .with_context(|| format!("path {:?} is not under root_folder {:?}", folder, root))?
         .to_path_buf();
 
-    let folder_name = folder
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let folder_name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let path_to_parent = rel
         .parent()
         .map(|p| p.to_path_buf())

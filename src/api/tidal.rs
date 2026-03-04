@@ -42,7 +42,8 @@ pub struct TidalProvider {
     /// Cached mapping of playlist_id → (full track_id → item_ids map, ETag)
     /// populated on the first `remove_tracks` call for each playlist within
     /// a worker run to avoid re-fetching all playlist items on every call.
-    item_id_cache: tokio::sync::Mutex<HashMap<String, (HashMap<String, Vec<String>>, Option<String>)>>,
+    item_id_cache:
+        tokio::sync::Mutex<HashMap<String, (HashMap<String, Vec<String>>, Option<String>)>>,
 }
 
 impl TidalProvider {
@@ -160,7 +161,10 @@ impl TidalProvider {
                                 let pl_url =
                                     format!("{}/playlists/{}?countryCode={}", base, id, cc);
                                 let pl_resp = self
-                                    .execute_request("list_user_playlists/item", &RequestSpec::get(&pl_url))
+                                    .execute_request(
+                                        "list_user_playlists/item",
+                                        &RequestSpec::get(&pl_url),
+                                    )
                                     .await?;
                                 if !pl_resp.status().is_success() {
                                     continue;
@@ -389,13 +393,7 @@ impl TidalProvider {
         let client_secret = self.client_secret.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             let conn = rusqlite::Connection::open(db_path)?;
-            db::save_credential_raw(
-                &conn,
-                "tidal",
-                &s,
-                Some(&client_id),
-                Some(&client_secret),
-            )?;
+            db::save_credential_raw(&conn, "tidal", &s, Some(&client_id), Some(&client_secret))?;
             Ok(())
         })
         .await??;
@@ -1055,7 +1053,10 @@ impl Provider for TidalProvider {
             Err(e) => {
                 // If we can't list playlists (e.g. network error), propagate
                 // so the caller can retry rather than silently assuming valid.
-                Err(anyhow!("playlist_is_valid: failed to list user playlists: {}", e))
+                Err(anyhow!(
+                    "playlist_is_valid: failed to list user playlists: {}",
+                    e
+                ))
             }
         }
     }
@@ -1212,10 +1213,7 @@ impl Provider for TidalProvider {
             })
             .collect();
         if invalid_count > 0 {
-            log::warn!(
-                "tidal add_tracks skipped {} invalid uri(s)",
-                invalid_count
-            );
+            log::warn!("tidal add_tracks skipped {} invalid uri(s)", invalid_count);
         }
         if data.is_empty() {
             // Nothing to add once URIs are normalized.
@@ -1261,10 +1259,7 @@ impl Provider for TidalProvider {
         }
 
         // JSON:API relationship endpoint for deleting items.
-        let url = format!(
-            "{}/playlists/{}/relationships/items",
-            base, playlist_id
-        );
+        let url = format!("{}/playlists/{}/relationships/items", base, playlist_id);
 
         // Attempt the DELETE using (potentially cached) item ids.  If a chunk
         // fails and we haven't yet retried with a fresh fetch, invalidate the
@@ -1340,7 +1335,8 @@ impl Provider for TidalProvider {
                         log::warn!(
                             "tidal remove_tracks: DELETE failed with cached item ids for \
                              playlist {}, retrying with fresh fetch; error={}",
-                            playlist_id, err
+                            playlist_id,
+                            err
                         );
                         self.invalidate_item_id_cache(playlist_id).await;
                         retried_fresh = true;
@@ -1493,7 +1489,10 @@ impl Provider for TidalProvider {
                     crate::db::delete_provider_playlist_list_cache(&conn, "tidal")?;
                 }
             }
-            log::debug!("invalidate_playlist_list_cache: removed {} from tidal playlist cache", pid2);
+            log::debug!(
+                "invalidate_playlist_list_cache: removed {} from tidal playlist cache",
+                pid2
+            );
             Ok(())
         })
         .await;

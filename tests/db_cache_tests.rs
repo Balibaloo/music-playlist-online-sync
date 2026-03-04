@@ -1,13 +1,13 @@
-use music_file_playlist_online_sync::db;
-use music_file_playlist_online_sync::api;
-use music_file_playlist_online_sync::models;
-use music_file_playlist_online_sync::api::Provider;
-use music_file_playlist_online_sync::models::EventAction;
-use rusqlite::{Connection, params};
-use tempfile::tempdir;
-use chrono::Utc;
-use std::sync::Arc;
 use async_trait::async_trait;
+use chrono::Utc;
+use music_file_playlist_online_sync::api;
+use music_file_playlist_online_sync::api::Provider;
+use music_file_playlist_online_sync::db;
+use music_file_playlist_online_sync::models;
+use music_file_playlist_online_sync::models::EventAction;
+use rusqlite::{params, Connection};
+use std::sync::Arc;
+use tempfile::tempdir;
 
 #[test]
 fn playlist_map_and_track_cache_persistence() {
@@ -88,7 +88,6 @@ fn track_cache_migration_prefixes_spotify_entries() {
     assert_eq!(row.2, "spotify::/foo/bar.mp3");
 }
 
-
 #[tokio::test]
 async fn playlist_cache_and_rename_migration() {
     // set up a temporary root folder with a playlist and a single track
@@ -149,7 +148,11 @@ async fn playlist_cache_and_rename_migration() {
         async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+        async fn search_track_uri(
+            &self,
+            _title: &str,
+            _artist: &str,
+        ) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
             Ok(Some("uri".to_string()))
@@ -183,33 +186,56 @@ async fn playlist_cache_and_rename_migration() {
     let provider = Arc::new(CountingProvider::new(counter.clone()));
 
     // first run should populate cache and increment counter
-    let (uris1, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
-        .await
-        .unwrap();
+    let (uris1, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(
+        &cfg,
+        "foo",
+        provider.clone(),
+        &pool,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(uris1, vec!["uri".to_string()]);
     let calls_after_first = *counter.lock().unwrap();
     assert!(calls_after_first > 0);
 
     // second run without changing the file should hit cache and not increment
-    let (uris2, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false)
-        .await
-        .unwrap();
+    let (uris2, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(
+        &cfg,
+        "foo",
+        provider.clone(),
+        &pool,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(uris2, uris1);
     assert_eq!(calls_after_first, *counter.lock().unwrap());
 
     // migrate/rename the playlist folder on disk and in the database
     std::fs::rename(root.join("foo"), root.join("bar")).unwrap();
     // playlist file is now root/bar/bar.m3u (we also rename it to match)
-    std::fs::rename(root.join("bar").join("foo.m3u"), root.join("bar").join("bar.m3u")).unwrap();
+    std::fs::rename(
+        root.join("bar").join("foo.m3u"),
+        root.join("bar").join("bar.m3u"),
+    )
+    .unwrap();
 
     // manually migrate cache entry
     let conn = rusqlite::Connection::open(cfg.db_path.clone()).unwrap();
-    music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "count", "foo", "bar").unwrap();
+    music_file_playlist_online_sync::db::migrate_playlist_cache(&conn, "count", "foo", "bar")
+        .unwrap();
 
     // third run using new logical name should also hit cache (no new provider calls)
-    let (uris3, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "bar", provider.clone(), &pool, false)
-        .await
-        .unwrap();
+    let (uris3, _) = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(
+        &cfg,
+        "bar",
+        provider.clone(),
+        &pool,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(uris3, uris1);
     assert_eq!(calls_after_first, *counter.lock().unwrap());
 }
@@ -272,20 +298,42 @@ async fn skip_resolve_when_track_ops() {
     }
     #[async_trait::async_trait]
     impl api::Provider for CountingProvider {
-        fn name(&self) -> &str { "count" }
-        fn is_authenticated(&self) -> bool { true }
-        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> { Ok("id".into()) }
-        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
-        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
-        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+        fn name(&self) -> &str {
+            "count"
+        }
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> {
+            Ok("id".into())
+        }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn search_track_uri(
+            &self,
+            _title: &str,
+            _artist: &str,
+        ) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
             Ok(Some("uri".to_string()))
         }
-        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(String::new()))
+        }
         async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
@@ -316,11 +364,21 @@ async fn skip_resolve_when_track_ops() {
     let mut reconcile_desired: Option<Vec<String>> = None;
     if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
         // would call `desired_remote_uris_for_playlist` here
-        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false).await;
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(
+            &cfg,
+            "foo",
+            provider.clone(),
+            &pool,
+            false,
+        )
+        .await;
         reconcile_desired = Some(Vec::new());
     }
 
-    assert!(reconcile_desired.is_none(), "precompute should have been skipped");
+    assert!(
+        reconcile_desired.is_none(),
+        "precompute should have been skipped"
+    );
     // nothing should have been looked up
     assert_eq!(*counter.lock().unwrap(), 0);
 }
@@ -353,26 +411,64 @@ async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
         let conn = rusqlite::Connection::open(&cfg.db_path).unwrap();
         music_file_playlist_online_sync::db::run_migrations(&conn).unwrap();
         // populate cache entries
-        music_file_playlist_online_sync::db::upsert_track_cache(&conn, "spotify", "song.mp3", None, Some("spotify:track:foo")).unwrap();
-        music_file_playlist_online_sync::db::upsert_track_cache(&conn, "tidal", "song.mp3", None, Some("tidal:track:100")).unwrap();
+        music_file_playlist_online_sync::db::upsert_track_cache(
+            &conn,
+            "spotify",
+            "song.mp3",
+            None,
+            Some("spotify:track:foo"),
+        )
+        .unwrap();
+        music_file_playlist_online_sync::db::upsert_track_cache(
+            &conn,
+            "tidal",
+            "song.mp3",
+            None,
+            Some("tidal:track:100"),
+        )
+        .unwrap();
     }
 
     struct DummyProvider;
     #[async_trait::async_trait]
     impl api::Provider for DummyProvider {
-        fn name(&self) -> &str { "tidal" }
-        fn is_authenticated(&self) -> bool { true }
-        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> { Ok("id".into()) }
-        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
-        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
-        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+        fn name(&self) -> &str {
+            "tidal"
+        }
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> {
+            Ok("id".into())
+        }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn search_track_uri(
+            &self,
+            _title: &str,
+            _artist: &str,
+        ) -> anyhow::Result<Option<String>> {
             Ok(None)
         }
-        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
-        async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> { Ok(None) }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(String::new()))
+        }
+        async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
         fn http_client(&self) -> &reqwest::Client {
             use std::sync::OnceLock;
             static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -392,7 +488,10 @@ async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
     let mut add_uris: Vec<String> = Vec::new();
     let mut remove_uris: Vec<String> = Vec::new();
     let mut track_ops: Vec<(models::EventAction, Option<String>)> = Vec::new();
-    track_ops.push((models::EventAction::Add, Some("spotify:track:foo".to_string())));
+    track_ops.push((
+        models::EventAction::Add,
+        Some("spotify:track:foo".to_string()),
+    ));
 
     for (act, track_path_opt) in track_ops.into_iter() {
         if let Some(mut tp) = track_path_opt {
@@ -408,10 +507,12 @@ async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
             if tp.contains(':') && !tp.starts_with(&format!("{}:", provider.name())) {
                 let db_path = cfg.db_path.clone();
                 let uri_clone = tp.clone();
-                if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
-                    let conn = rusqlite::Connection::open(db_path)?;
-                    Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
-                })
+                if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(
+                    move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
+                        let conn = rusqlite::Connection::open(db_path)?;
+                        Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
+                    },
+                )
                 .await??
                 {
                     if let Some(idx) = local_path.find("::") {
@@ -453,16 +554,21 @@ async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
     // now try with a URI that has no local mapping; it should be skipped.
     let mut add_uris2: Vec<String> = Vec::new();
     let mut track_ops2: Vec<(models::EventAction, Option<String>)> = Vec::new();
-    track_ops2.push((models::EventAction::Add, Some("spotify:track:missing".to_string())));
+    track_ops2.push((
+        models::EventAction::Add,
+        Some("spotify:track:missing".to_string()),
+    ));
     for (act, track_path_opt) in track_ops2.into_iter() {
         if let Some(mut tp) = track_path_opt {
             if tp.contains(':') && !tp.starts_with(&format!("{}:", provider.name())) {
                 let db_path = cfg.db_path.clone();
                 let uri_clone = tp.clone();
-                if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
-                    let conn = rusqlite::Connection::open(db_path)?;
-                    Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
-                })
+                if let Some((_isrc, mut local_path, _)) = tokio::task::spawn_blocking(
+                    move || -> Result<Option<(Option<String>, String, i64)>, anyhow::Error> {
+                        let conn = rusqlite::Connection::open(db_path)?;
+                        Ok(db::get_track_cache_by_remote(&conn, &uri_clone)?)
+                    },
+                )
                 .await??
                 {
                     // mirror the stripping logic added to the worker
@@ -477,7 +583,10 @@ async fn provider_uri_ops_resolve_via_local() -> anyhow::Result<()> {
             add_uris2.push(tp);
         }
     }
-    assert!(add_uris2.is_empty(), "URI without local mapping should be dropped");
+    assert!(
+        add_uris2.is_empty(),
+        "URI without local mapping should be dropped"
+    );
     Ok(())
 }
 
@@ -519,20 +628,42 @@ async fn skip_resolve_on_rename_only() {
     }
     #[async_trait::async_trait]
     impl api::Provider for CountingProvider {
-        fn name(&self) -> &str { "count" }
-        fn is_authenticated(&self) -> bool { true }
-        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> { Ok("id".into()) }
-        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> { Ok(()) }
-        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> { Ok(()) }
-        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> { Ok(()) }
-        async fn search_track_uri(&self, _title: &str, _artist: &str) -> anyhow::Result<Option<String>> {
+        fn name(&self) -> &str {
+            "count"
+        }
+        fn is_authenticated(&self) -> bool {
+            true
+        }
+        async fn ensure_playlist(&self, _name: &str, _desc: &str) -> anyhow::Result<String> {
+            Ok("id".into())
+        }
+        async fn rename_playlist(&self, _playlist_id: &str, _new_name: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn add_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn remove_tracks(&self, _playlist_id: &str, _uris: &[String]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_playlist(&self, _playlist_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn search_track_uri(
+            &self,
+            _title: &str,
+            _artist: &str,
+        ) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
             Ok(Some("uri".to_string()))
         }
-        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> { Ok(Vec::new()) }
-        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> { Ok(Some(String::new())) }
+        async fn list_playlist_tracks(&self, _playlist_id: &str) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn playlist_is_valid(&self, _playlist_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(String::new()))
+        }
         async fn search_track_uri_by_isrc(&self, _isrc: &str) -> anyhow::Result<Option<String>> {
             let mut c = self.0.lock().unwrap();
             *c += 1;
@@ -560,10 +691,20 @@ async fn skip_resolve_on_rename_only() {
 
     let mut reconcile_desired: Option<Vec<String>> = None;
     if !has_delete && track_ops.is_empty() && rename_opt.is_none() {
-        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(&cfg, "foo", provider.clone(), &pool, false).await;
+        let _ = music_file_playlist_online_sync::worker::desired_remote_uris_for_playlist(
+            &cfg,
+            "foo",
+            provider.clone(),
+            &pool,
+            false,
+        )
+        .await;
         reconcile_desired = Some(Vec::new());
     }
 
-    assert!(reconcile_desired.is_none(), "precompute should have been skipped on rename");
+    assert!(
+        reconcile_desired.is_none(),
+        "precompute should have been skipped on rename"
+    );
     assert_eq!(*counter.lock().unwrap(), 0);
 }

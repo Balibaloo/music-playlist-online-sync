@@ -5,8 +5,8 @@ pub mod spotify_auth;
 pub mod tidal;
 pub mod tidal_auth;
 
-use anyhow::Result;
 use crate::config::Config;
+use anyhow::Result;
 
 /// Describes an HTTP request to be executed by [`Provider::execute_request`].
 ///
@@ -26,13 +26,28 @@ pub struct RequestSpec {
 
 impl RequestSpec {
     fn new(method: reqwest::Method, url: impl Into<String>) -> Self {
-        Self { method, url: url.into(), json: None, headers: vec![] }
+        Self {
+            method,
+            url: url.into(),
+            json: None,
+            headers: vec![],
+        }
     }
-    pub fn get(url: impl Into<String>) -> Self    { Self::new(reqwest::Method::GET,    url) }
-    pub fn post(url: impl Into<String>) -> Self   { Self::new(reqwest::Method::POST,   url) }
-    pub fn put(url: impl Into<String>) -> Self    { Self::new(reqwest::Method::PUT,    url) }
-    pub fn patch(url: impl Into<String>) -> Self  { Self::new(reqwest::Method::PATCH,  url) }
-    pub fn delete(url: impl Into<String>) -> Self { Self::new(reqwest::Method::DELETE, url) }
+    pub fn get(url: impl Into<String>) -> Self {
+        Self::new(reqwest::Method::GET, url)
+    }
+    pub fn post(url: impl Into<String>) -> Self {
+        Self::new(reqwest::Method::POST, url)
+    }
+    pub fn put(url: impl Into<String>) -> Self {
+        Self::new(reqwest::Method::PUT, url)
+    }
+    pub fn patch(url: impl Into<String>) -> Self {
+        Self::new(reqwest::Method::PATCH, url)
+    }
+    pub fn delete(url: impl Into<String>) -> Self {
+        Self::new(reqwest::Method::DELETE, url)
+    }
 
     /// Attach a JSON body (sets `Content-Type: application/json` by default).
     pub fn json(mut self, body: serde_json::Value) -> Self {
@@ -106,14 +121,12 @@ pub trait Provider: Send + Sync {
             let bearer = self.get_bearer().await?;
             let client = self.http_client();
             let mut builder = match spec.method {
-                reqwest::Method::GET    => client.get(&spec.url),
-                reqwest::Method::POST   => client.post(&spec.url),
-                reqwest::Method::PUT    => client.put(&spec.url),
-                reqwest::Method::PATCH  => client.patch(&spec.url),
+                reqwest::Method::GET => client.get(&spec.url),
+                reqwest::Method::POST => client.post(&spec.url),
+                reqwest::Method::PUT => client.put(&spec.url),
+                reqwest::Method::PATCH => client.patch(&spec.url),
                 reqwest::Method::DELETE => client.delete(&spec.url),
-                ref m => return Err(anyhow::anyhow!(
-                    "execute_request: unsupported method {}", m
-                )),
+                ref m => return Err(anyhow::anyhow!("execute_request: unsupported method {}", m)),
             };
             builder = builder.header(AUTHORIZATION, &bearer);
             // If a content-type override is present in spec.headers, serialize the
@@ -121,11 +134,15 @@ pub trait Provider: Send + Sync {
             // we don't end up with two Content-Type headers (reqwest's .json() always
             // appends application/json; calling .header() afterwards only adds a second
             // value rather than replacing it, which confuses some API servers).
-            let has_ct_override = spec.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+            let has_ct_override = spec
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
             if let Some(body) = &spec.json {
                 if has_ct_override {
-                    let bytes = serde_json::to_vec(body)
-                        .map_err(|e| anyhow::anyhow!("execute_request: JSON serialization failed: {}", e))?;
+                    let bytes = serde_json::to_vec(body).map_err(|e| {
+                        anyhow::anyhow!("execute_request: JSON serialization failed: {}", e)
+                    })?;
                     builder = builder.body(bytes);
                 } else {
                     builder = builder.json(body);
@@ -137,9 +154,7 @@ pub trait Provider: Send + Sync {
             let resp = builder.send().await?;
             let status = resp.status();
 
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                && attempt <= max_retries
-            {
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt <= max_retries {
                 let retry_after = resp
                     .headers()
                     .get("retry-after")
@@ -149,7 +164,10 @@ pub trait Provider: Send + Sync {
                 let sleep_secs = retry_after + 1;
                 log::info!(
                     "{} {} rate limited – sleeping {} s (attempt {})",
-                    self.name(), op, sleep_secs, attempt,
+                    self.name(),
+                    op,
+                    sleep_secs,
+                    attempt,
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
                 continue;
@@ -158,7 +176,8 @@ pub trait Provider: Send + Sync {
             if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 1 {
                 log::debug!(
                     "{} {} got 401, refreshing token and retrying",
-                    self.name(), op,
+                    self.name(),
+                    op,
                 );
                 self.refresh_token().await?;
                 continue;

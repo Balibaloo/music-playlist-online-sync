@@ -59,12 +59,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      new_tag: ${{ steps.bump.outputs.new_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Bump patch version tag
+        id: bump
         run: |
           git fetch --tags
           latest=$(git tag --sort=-v:refname | grep '^v' | head -n1)
@@ -79,10 +82,11 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "$new_tag"
           git push origin "$new_tag"
+          echo "new_tag=$new_tag" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: auto-tag
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -112,4 +116,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.auto-tag.outputs.new_tag }}
           files: target/release/cli

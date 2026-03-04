@@ -1179,9 +1179,10 @@ impl Provider for TidalProvider {
         let base = Self::base_url();
         // JSON:API relationship endpoint: POST /playlists/{id}/relationships/items
         let url = format!(
-            "{}/playlists/{}/relationships/items",
+            "{}/playlists/{}/relationships/items?countryCode={}",
             base,
             playlist_id,
+            Self::country_code(),
         );
         // Convert URIs like "tidal:track:{id}" into JSON:API relationship objects
         // { "data": [{"type": "tracks", "id": "{id}"}, ...] }.

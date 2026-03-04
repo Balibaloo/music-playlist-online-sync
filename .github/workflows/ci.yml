@@ -50,4 +50,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: music-file-playlist-online-sync
-          path: target/release/music-file-playlist-online-sync
+          path: target/release/cli

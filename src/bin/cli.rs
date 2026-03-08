@@ -34,7 +34,11 @@ enum Commands {
         trust_cache: bool,
     },
     /// Run a full reconciliation scan of the root folder
-    Reconcile,
+    Reconcile {
+        /// Trust the track/playlist cache even if local files have changed on disk.
+        #[arg(long)]
+        trust_cache: bool,
+    },
     /// Reconcile a single playlist folder, optionally restricted to one provider
     ReconcilePlaylist {
         /// Absolute (or root-relative) path to the playlist folder to reconcile
@@ -267,7 +271,7 @@ async fn main() -> Result<()> {
                 .await
                 .with_context(|| "running worker".to_string())?;
         }
-        Commands::Reconcile => {
+        Commands::Reconcile { trust_cache } => {
             // 1. Purge any DB-tracked playlists whose local folder is gone.
             lib::worker::purge_deleted_playlists(&cfg)
                 .await
@@ -277,7 +281,7 @@ async fn main() -> Result<()> {
             lib::worker::run_nightly_reconcile(&cfg)
                 .with_context(|| "reconcile scan failed".to_string())?;
             // 3. Drain the event queue so the remote is synced in the same run.
-            lib::worker::run_worker_once(&cfg, None, false)
+            lib::worker::run_worker_once(&cfg, None, trust_cache)
                 .await
                 .with_context(|| "worker run after reconcile failed".to_string())?;
         }

@@ -20,6 +20,78 @@ pub struct StoredToken {
     pub scope: Option<String>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn cache_db_updates_when_cold() {
+        // Create a unique temp DB path
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("mfpos_test_{}.db", nanos));
+
+        // Ensure migrations/schema are applied
+        let _ = crate::db::open_or_create(&path).expect("open_or_create DB");
+
+        let cfg = Config::default();
+        let prov = SpotifyProvider::new("".into(), "".into(), path.clone(), cfg);
+
+        // Start with cold in-memory cache
+        {
+            let cache = prov.playlist_cache.lock().await;
+            assert!(cache.is_none());
+        }
+
+        // Add an entry (should write to DB without warming full cache)
+        prov.cache_add_entry("pl1", "My Playlist").await;
+
+        // Verify DB row exists and contains the new entry
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open db");
+            let got = crate::db::get_provider_playlist_list_cache(&conn, "spotify")
+                .expect("get cache");
+            assert!(got.is_some());
+            let entries = got.unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, "pl1");
+            assert_eq!(entries[0].1, "My Playlist");
+        }
+
+        // Update the name
+        prov.cache_update_name("pl1", "My Playlist Renamed").await;
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open db");
+            let got = crate::db::get_provider_playlist_list_cache(&conn, "spotify")
+                .expect("get cache");
+            assert!(got.is_some());
+            let entries = got.unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].1, "My Playlist Renamed");
+        }
+
+        // Remove the entry
+        prov.cache_remove_entry("pl1").await;
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open db");
+            let got = crate::db::get_provider_playlist_list_cache(&conn, "spotify")
+                .expect("get cache");
+            // DB row should still exist but be an empty entries vector
+            assert!(got.is_some());
+            let entries = got.unwrap();
+            assert!(entries.is_empty());
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// Spotify provider backed by Spotify Web API.
 /// Token management reads token JSON from DB and persists refreshed tokens.
 /// Endpoints may be overridden by SPOTIFY_AUTH_BASE and SPOTIFY_API_BASE env vars (useful for tests).
@@ -192,67 +264,145 @@ impl SpotifyProvider {
     /// Update the cached name for an existing playlist after a rename,
     /// avoiding a full re-fetch of the user's library.
     async fn cache_update_name(&self, playlist_id: &str, new_name: &str) {
-        let updated = {
+        // If in-memory cache is populated, update it and persist the full
+        // entries list as before. If not, operate directly on the DB cache
+        // (read-modify-write) so we don't fetch the live provider list.
+        let mut did_update_db = false;
+        {
             let mut cache = self.playlist_cache.lock().await;
             if let Some(ref mut entries) = *cache {
                 if let Some(entry) = entries.iter_mut().find(|(id, _)| id == playlist_id) {
                     entry.1 = new_name.to_string();
+                } else {
+                    // If the id wasn't present in the in-memory cache, add it.
+                    entries.push((playlist_id.to_string(), new_name.to_string()));
                 }
-                Some(entries.clone())
-            } else {
-                None
+                let entries_clone = entries.clone();
+                let db_path = self.db_path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries_clone)
+                })
+                .await;
+                did_update_db = true;
             }
-        };
-        if let Some(entries) = updated {
+        }
+
+        if !did_update_db {
+            // DB-only path: read existing DB cache (if any), update or create
+            // a minimal entries vector and write it back.
             let db_path = self.db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let pid = playlist_id.to_string();
+            let nm = new_name.to_string();
+            let res = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(&db_path)?;
-                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)
+                if let Ok(Some(mut entries)) = crate::db::get_provider_playlist_list_cache(&conn, "spotify") {
+                    if let Some(e) = entries.iter_mut().find(|(id, _)| id == &pid) {
+                        e.1 = nm.clone();
+                    } else {
+                        entries.push((pid.clone(), nm.clone()));
+                    }
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)?;
+                } else {
+                    // No DB cache row: create a minimal one containing this single entry
+                    let entries = vec![(pid.clone(), nm.clone())];
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)?;
+                }
+                Ok(())
             })
             .await;
+            if let Err(e) = res {
+                log::warn!("spotify cache_update_name: DB write failed: {}", e);
+            }
         }
     }
 
     /// Add a newly-created playlist to the cache so that subsequent calls
     /// to `list_user_playlists` see it without a round-trip.
     async fn cache_add_entry(&self, playlist_id: &str, name: &str) {
-        let updated = {
+        // Same strategy as for update: if in-memory cache exists update+persist
+        // the full list. Otherwise modify the DB cache (or create a minimal
+        // DB cache row) without fetching the live provider list.
+        let mut did_update_db = false;
+        {
             let mut cache = self.playlist_cache.lock().await;
             if let Some(ref mut entries) = *cache {
                 entries.push((playlist_id.to_string(), name.to_string()));
-                Some(entries.clone())
-            } else {
-                None
+                let entries_clone = entries.clone();
+                let db_path = self.db_path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries_clone)
+                })
+                .await;
+                did_update_db = true;
             }
-        };
-        if let Some(entries) = updated {
+        }
+
+        if !did_update_db {
             let db_path = self.db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let id = playlist_id.to_string();
+            let nm = name.to_string();
+            let res = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(&db_path)?;
-                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)
+                if let Ok(Some(mut entries)) = crate::db::get_provider_playlist_list_cache(&conn, "spotify") {
+                    entries.push((id.clone(), nm.clone()));
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)?;
+                } else {
+                    let entries = vec![(id.clone(), nm.clone())];
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)?;
+                }
+                Ok(())
             })
             .await;
+            if let Err(e) = res {
+                log::warn!("spotify cache_add_entry: DB write failed: {}", e);
+            }
         }
     }
 
     /// Remove a deleted playlist from the cache.
     async fn cache_remove_entry(&self, playlist_id: &str) {
-        let updated = {
+        // Remove from in-memory cache if present; otherwise perform a
+        // DB-only read-modify-write so the persisted provider cache reflects
+        // the removal without warming from the remote API.
+        let mut did_update_db = false;
+        {
             let mut cache = self.playlist_cache.lock().await;
             if let Some(ref mut entries) = *cache {
+                let before = entries.len();
                 entries.retain(|(id, _)| id != playlist_id);
-                Some(entries.clone())
-            } else {
-                None
+                if entries.len() != before {
+                    let entries_clone = entries.clone();
+                    let db_path = self.db_path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let conn = rusqlite::Connection::open(&db_path)?;
+                        crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries_clone)
+                    })
+                    .await;
+                    did_update_db = true;
+                }
             }
-        };
-        if let Some(entries) = updated {
+        }
+
+        if !did_update_db {
             let db_path = self.db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let pid = playlist_id.to_string();
+            let res = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(&db_path)?;
-                crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)
+                if let Ok(Some(mut entries)) = crate::db::get_provider_playlist_list_cache(&conn, "spotify") {
+                    let before = entries.len();
+                    entries.retain(|(id, _)| id != &pid);
+                    if entries.len() != before {
+                        crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", &entries)?;
+                    }
+                }
+                Ok(())
             })
             .await;
+            if let Err(e) = res {
+                log::warn!("spotify cache_remove_entry: DB write failed: {}", e);
+            }
         }
     }
     pub fn new(

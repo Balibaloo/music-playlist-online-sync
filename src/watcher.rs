@@ -493,6 +493,9 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     let tree = Arc::new(Mutex::new(tree));
     let remote_whitelist = Arc::new(compile_whitelist(Some(cfg.effective_remote_whitelist())));
 
+    // Shared collection of join handles for short-lived DB-enqueue threads.
+    let enqueue_handles: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+
     // Spawn debounce worker thread: writes playlists when their debounce timer elapses and enqueues
     // a generic Create event for the playlist.
     {
@@ -501,6 +504,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
         let db_path = cfg.db_path.clone();
         let _tree = tree.clone();
         let remote_whitelist = remote_whitelist.clone();
+        let enqueue_handles = enqueue_handles.clone();
         thread::spawn(move || {
             // Deadline for deferred worker spawn after an over-threshold batch.
             // None means no pending deferred trigger.
@@ -582,7 +586,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                     if matches_whitelist(&folder, &remote_whitelist) {
                         let playlist_name2 = rel.display().to_string();
                         let db_path2 = db_path.clone();
-                        thread::spawn(move || {
+                        let h = std::thread::spawn(move || {
                             if let Ok(conn) = db::open_or_create(std::path::Path::new(&db_path2)) {
                                 if let Err(e) = db::enqueue_event(
                                     &conn,
@@ -600,6 +604,8 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                 );
                             }
                         });
+                        let mut guard = enqueue_handles.lock().unwrap();
+                        guard.push(h);
                     }
                 }
 
@@ -613,6 +619,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                         "Watcher: {} file event(s) in batch (threshold {}) \u{2014} spawning worker --trust-cache",
                         total_events, instant_threshold
                     );
+                    // Wait for any outstanding DB-enqueue threads to finish so the
+                    // worker sees the freshly-enqueued rows.
+                    let handles = std::mem::take(&mut *enqueue_handles.lock().unwrap());
+                    for h in handles {
+                        let _ = h.join();
+                    }
                     let _ = std::process::Command::new("music-file-playlist-online-sync")
                         .args(["worker", "--trust-cache"])
                         .spawn();
@@ -633,13 +645,18 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                 // Fire the deferred trigger once the deadline has passed AND all
                 // in-flight debounce windows have also expired (map is empty).
                 // This prevents the worker from running mid-burst.
-                if let Some(deadline) = deferred_trigger {
+                    if let Some(deadline) = deferred_trigger {
                     let map_empty = debounce_map.lock().map(|g| g.is_empty()).unwrap_or(false);
                     if Instant::now() >= deadline && map_empty {
                         info!("Watcher: deferred trigger firing \u{2014} spawning worker --trust-cache");
-                        let _ = std::process::Command::new("music-file-playlist-online-sync")
-                            .args(["worker", "--trust-cache"])
-                            .spawn();
+                            // Ensure outstanding enqueue threads complete before spawning.
+                            let handles = std::mem::take(&mut *enqueue_handles.lock().unwrap());
+                            for h in handles {
+                                let _ = h.join();
+                            }
+                            let _ = std::process::Command::new("music-file-playlist-online-sync")
+                                .args(["worker", "--trust-cache"]) 
+                                .spawn();
                         deferred_trigger = None;
                     }
                 }
@@ -656,6 +673,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
     let cfg_cb = cfg.clone();
     let db_path = cfg_cb.db_path.clone();
     let remote_whitelist_cb = remote_whitelist.clone();
+    let enqueue_handles_cb = enqueue_handles.clone();
 
     // Create a RecommendedWatcher that will call our closure for each FS event.
     let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(
@@ -876,7 +894,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                         .to_string()
                                                 })
                                                 .collect();
-                                            thread::spawn(move || {
+                                            let h = thread::spawn(move || {
                                                 if let Ok(conn) = db::open_or_create(
                                                     std::path::Path::new(&db_path2),
                                                 ) {
@@ -893,6 +911,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                     }
                                                 }
                                             });
+                                            enqueue_handles_cb.lock().unwrap().push(h);
                                         }
                                         LogicalOp::Remove {
                                             playlist_folder,
@@ -979,7 +998,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                         .to_string()
                                                 })
                                                 .collect();
-                                            thread::spawn(move || {
+                                            let h = thread::spawn(move || {
                                                 if let Ok(conn) = db::open_or_create(
                                                     std::path::Path::new(&db_path2),
                                                 ) {
@@ -996,6 +1015,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                     }
                                                 }
                                             });
+                                            enqueue_handles_cb.lock().unwrap().push(h);
                                         }
                                         LogicalOp::Create { playlist_folder } => {
                                             if let Some(ref wlvec) = t.whitelist {
@@ -1104,7 +1124,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                     .unwrap_or(&playlist_folder)
                                                     .display()
                                                     .to_string();
-                                                thread::spawn(move || {
+                                                let h = thread::spawn(move || {
                                                     if let Ok(conn) = db::open_or_create(
                                                         std::path::Path::new(&db_path2),
                                                     ) {
@@ -1119,6 +1139,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                         }
                                                     }
                                                 });
+                                                enqueue_handles_cb.lock().unwrap().push(h);
                                             }
                                         }
                                         LogicalOp::PlaylistRename {
@@ -1317,7 +1338,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                     let db_path2 = db_path.clone();
                                                     let pname = playlist_name_from.clone();
                                                     let extra_clone = extra.clone();
-                                                    thread::spawn(move || {
+                                                    let h = thread::spawn(move || {
                                                         if let Ok(conn) = db::open_or_create(
                                                             std::path::Path::new(&db_path2),
                                                         ) {
@@ -1339,11 +1360,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                             }
                                                         }
                                                     });
+                                                    enqueue_handles_cb.lock().unwrap().push(h);
                                                 }
                                                 (true, false) => {
                                                     let db_path2 = db_path.clone();
                                                     let pname = playlist_name_from.clone();
-                                                    thread::spawn(move || {
+                                                    let h = thread::spawn(move || {
                                                         if let Ok(conn) = db::open_or_create(
                                                             std::path::Path::new(&db_path2),
                                                         ) {
@@ -1361,11 +1383,12 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                             }
                                                         }
                                                     });
+                                                    enqueue_handles_cb.lock().unwrap().push(h);
                                                 }
                                                 (false, true) => {
                                                     let db_path2 = db_path.clone();
                                                     let pname = playlist_name_to.clone();
-                                                    thread::spawn(move || {
+                                                    let h = thread::spawn(move || {
                                                         if let Ok(conn) = db::open_or_create(
                                                             std::path::Path::new(&db_path2),
                                                         ) {
@@ -1383,6 +1406,7 @@ pub fn run_watcher(cfg: &Config) -> anyhow::Result<()> {
                                                             }
                                                         }
                                                     });
+                                                    enqueue_handles_cb.lock().unwrap().push(h);
                                                 }
                                                 _ => {}
                                             }

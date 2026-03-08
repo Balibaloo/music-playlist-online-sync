@@ -212,67 +212,135 @@ impl TidalProvider {
     /// Update the cached name for an existing playlist after a rename,
     /// avoiding a full re-fetch of the user's library.
     async fn cache_update_name(&self, playlist_id: &str, new_name: &str) {
-        let updated = {
+        // If in-memory cache is populated, update it and persist the full
+        // entries list as before. Otherwise perform a DB read-modify-write
+        // so we avoid fetching the live provider list.
+        let mut did_update_db = false;
+        {
             let mut cache = self.playlist_cache.lock().await;
             if let Some(ref mut entries) = *cache {
                 if let Some(entry) = entries.iter_mut().find(|(id, _)| id == playlist_id) {
                     entry.1 = new_name.to_string();
+                } else {
+                    entries.push((playlist_id.to_string(), new_name.to_string()));
                 }
-                Some(entries.clone())
-            } else {
-                None
+                let entries_clone = entries.clone();
+                let db_path = self.db_path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries_clone)
+                })
+                .await;
+                did_update_db = true;
             }
-        };
-        if let Some(entries) = updated {
+        }
+
+        if !did_update_db {
             let db_path = self.db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let pid = playlist_id.to_string();
+            let nm = new_name.to_string();
+            let res = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(&db_path)?;
-                crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)
+                if let Ok(Some(mut entries)) = crate::db::get_provider_playlist_list_cache(&conn, "tidal") {
+                    if let Some(e) = entries.iter_mut().find(|(id, _)| id == &pid) {
+                        e.1 = nm.clone();
+                    } else {
+                        entries.push((pid.clone(), nm.clone()));
+                    }
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)?;
+                } else {
+                    let entries = vec![(pid.clone(), nm.clone())];
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)?;
+                }
+                Ok(())
             })
             .await;
+            if let Err(e) = res {
+                log::warn!("tidal cache_update_name: DB write failed: {}", e);
+            }
         }
     }
 
     /// Add a newly-created playlist to the cache so that subsequent calls
     /// to `list_user_playlists` see it without a round-trip.
     async fn cache_add_entry(&self, playlist_id: &str, name: &str) {
-        let updated = {
+        let mut did_update_db = false;
+        {
             let mut cache = self.playlist_cache.lock().await;
             if let Some(ref mut entries) = *cache {
                 entries.push((playlist_id.to_string(), name.to_string()));
-                Some(entries.clone())
-            } else {
-                None
+                let entries_clone = entries.clone();
+                let db_path = self.db_path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries_clone)
+                })
+                .await;
+                did_update_db = true;
             }
-        };
-        if let Some(entries) = updated {
+        }
+
+        if !did_update_db {
             let db_path = self.db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let id = playlist_id.to_string();
+            let nm = name.to_string();
+            let res = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(&db_path)?;
-                crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)
+                if let Ok(Some(mut entries)) = crate::db::get_provider_playlist_list_cache(&conn, "tidal") {
+                    entries.push((id.clone(), nm.clone()));
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)?;
+                } else {
+                    let entries = vec![(id.clone(), nm.clone())];
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)?;
+                }
+                Ok(())
             })
             .await;
+            if let Err(e) = res {
+                log::warn!("tidal cache_add_entry: DB write failed: {}", e);
+            }
         }
     }
 
     /// Remove a deleted playlist from the cache.
     async fn cache_remove_entry(&self, playlist_id: &str) {
-        let updated = {
+        let mut did_update_db = false;
+        {
             let mut cache = self.playlist_cache.lock().await;
             if let Some(ref mut entries) = *cache {
+                let before = entries.len();
                 entries.retain(|(id, _)| id != playlist_id);
-                Some(entries.clone())
-            } else {
-                None
+                if entries.len() != before {
+                    let entries_clone = entries.clone();
+                    let db_path = self.db_path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let conn = rusqlite::Connection::open(&db_path)?;
+                        crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries_clone)
+                    })
+                    .await;
+                    did_update_db = true;
+                }
             }
-        };
-        if let Some(entries) = updated {
+        }
+
+        if !did_update_db {
             let db_path = self.db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let pid = playlist_id.to_string();
+            let res = tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                 let conn = rusqlite::Connection::open(&db_path)?;
-                crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)
+                if let Ok(Some(mut entries)) = crate::db::get_provider_playlist_list_cache(&conn, "tidal") {
+                    let before = entries.len();
+                    entries.retain(|(id, _)| id != &pid);
+                    if entries.len() != before {
+                        crate::db::upsert_provider_playlist_list_cache(&conn, "tidal", &entries)?;
+                    }
+                }
+                Ok(())
             })
             .await;
+            if let Err(e) = res {
+                log::warn!("tidal cache_remove_entry: DB write failed: {}", e);
+            }
         }
     }
 

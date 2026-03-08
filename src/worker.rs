@@ -1208,6 +1208,13 @@ pub async fn run_worker_once(
                             Ok(())
                         })
                         .await??;
+                                log::info!(
+                                    "{} {} {} ensure_playlist_persisted id={}",
+                                    log_run_tag(&worker_id),
+                                    pl_tag,
+                                    log_phase_tag("REMOTE_ID"),
+                                    rid
+                                );
                         rid
                     }
                     Err(e) => {

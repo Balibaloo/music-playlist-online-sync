@@ -474,6 +474,31 @@ impl Provider for SpotifyProvider {
         SpotifyProvider::is_authenticated(self)
     }
     async fn ensure_playlist(&self, name: &str, description: &str) -> Result<String> {
+        // Before creating a new playlist, check whether the user already owns
+        // one with this exact name. This keeps Spotify behavior aligned with
+        // TIDAL and prevents duplicates when the local mapping is missing or
+        // stale but the remote playlist still exists.
+        match self.list_user_playlists().await {
+            Ok(playlists) => {
+                if let Some((existing_id, _)) = playlists.iter().find(|(_id, n)| n == name) {
+                    log::info!(
+                        "SpotifyProvider ensure_playlist: found existing playlist '{}' with id {}",
+                        name,
+                        existing_id
+                    );
+                    return Ok(existing_id.clone());
+                }
+            }
+            Err(e) => {
+                // Non-fatal: if listing fails we fall through to create.
+                log::warn!(
+                    "SpotifyProvider ensure_playlist: could not list playlists to check for '{}': {}",
+                    name,
+                    e
+                );
+            }
+        }
+
         let user_id = self.get_user_id().await?;
         let url = format!(
             "{}/users/{}/playlists",
@@ -564,6 +589,53 @@ impl Provider for SpotifyProvider {
 
     async fn playlist_is_valid(&self, playlist_id: &str) -> Result<Option<String>> {
         self.playlist_is_accessible(playlist_id).await
+    }
+
+    async fn invalidate_playlist_list_cache(&self, playlist_id: &str) {
+        // Remove only the dead entry from the in-memory cache. If the cache is
+        // cold, warm it from the DB so we can surgically remove one stale id.
+        let pid = playlist_id.to_string();
+        let db_path = self.db_path.clone();
+        let updated = {
+            let mut cache = self.playlist_cache.lock().await;
+            if cache.is_none() {
+                let loaded = tokio::task::spawn_blocking(move || {
+                    let conn = rusqlite::Connection::open(&db_path)?;
+                    crate::db::get_provider_playlist_list_cache(&conn, "spotify")
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+                *cache = loaded;
+            }
+            if let Some(ref mut entries) = *cache {
+                entries.retain(|(id, _)| id != &pid);
+                Some(entries.clone())
+            } else {
+                None
+            }
+        };
+
+        let db_path = self.db_path.clone();
+        let pid2 = playlist_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = rusqlite::Connection::open(&db_path)?;
+            match updated {
+                Some(ref entries) => {
+                    crate::db::upsert_provider_playlist_list_cache(&conn, "spotify", entries)?;
+                }
+                None => {
+                    crate::db::delete_provider_playlist_list_cache(&conn, "spotify")?;
+                }
+            }
+            log::debug!(
+                "invalidate_playlist_list_cache: removed {} from spotify playlist cache",
+                pid2
+            );
+            Ok(())
+        })
+        .await;
     }
 
     async fn list_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<String>> {
